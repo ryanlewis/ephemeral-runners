@@ -86,6 +86,7 @@ func TestErrors(t *testing.T) {
 		{"unknown field", `"name_prefix"`, `"repo": [], "name_prefix"`, `unknown field "repo"`},
 		{"size also a label", `"example"]`, `"example", "large"]`, `size "large" is also in labels`},
 		{"bad api url", `"/k.pem"`, `"/k.pem", "api_url": "api.github.com"`, "github.api_url"},
+		{"sizes differ only in case", `"name_prefix"`, `"sizes": {"large": {"vcpus": 8, "memory_gib": 20}, "Large": {"vcpus": 2, "memory_gib": 4}, "medium": {"vcpus": 4, "memory_gib": 12}}, "name_prefix"`, `sizes "Large" and "large" differ only in case`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
