@@ -1,0 +1,15 @@
+[Unit]
+Description=GitHub Actions runner: one job, then power off
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=exec
+ExecStart=/usr/local/sbin/actions-runner-start
+ExecStopPost=/usr/bin/systemctl poweroff --no-block
+Environment=PATH=/home/runner/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Read the JIT config the host attached as a small disk with serial
+# "jitconfig", then run one job as the runner user.
+set -euo pipefail
+
+disk=/dev/disk/by-id/virtio-jitconfig
+for _ in $(seq 50); do
+  [[ -e $disk ]] && break
+  sleep 0.1
+done
+
+echo "RUNNER-START uptime=$(cut -d' ' -f1 /proc/uptime)" > /dev/ttyS0
+
+if [[ ! -e $disk ]]; then
+  echo "RUNNER-NOJIT no jitconfig disk attached" > /dev/ttyS0
+  exit 1
+fi
+
+jit=$(tr -d '\0' < "$disk")
+cd /home/runner/actions-runner
+exec runuser -u runner -- ./run.sh --jitconfig "$jit"
