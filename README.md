@@ -46,6 +46,11 @@ sudo apt install libvirt-daemon-system libvirt-clients qemu-system-x86 \
   qemu-utils ovmf libguestfs-tools golang
 ```
 
+Each VM's network port is isolated, so VMs on the same bridge or libvirt
+network can't reach each other. Keeping them away from the host and the LAN is
+up to the network: a bridge with no host address on a network that only routes
+to the internet, for example.
+
 **1. Install the program.** From a checkout, build the binary as a normal user
 (or cross-compile it on another machine), then install it as root:
 

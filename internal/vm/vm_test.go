@@ -184,7 +184,7 @@ func TestCreateCold(t *testing.T) {
 		t.Errorf("jit disk %+v", j)
 	}
 
-	wantNIC := nic{Type: "network", Source: nicSource{Network: "default"}, Model: model{Type: "virtio"}}
+	wantNIC := nic{Type: "network", Source: nicSource{Network: "default"}, Model: model{Type: "virtio"}, Port: nicPort{Isolated: "yes"}}
 	if !slices.Equal(d.Devices.Interfaces, []nic{wantNIC}) {
 		t.Errorf("interfaces %+v", d.Devices.Interfaces)
 	}
@@ -226,7 +226,7 @@ func TestCreateBridge(t *testing.T) {
 		t.Fatal(err)
 	}
 	d := parseDomain(t, filepath.Join(s.StateDir, s.Name, "domain.xml"))
-	want := nic{Type: "bridge", Source: nicSource{Bridge: "br-runners"}, Model: model{Type: "virtio"}}
+	want := nic{Type: "bridge", Source: nicSource{Bridge: "br-runners"}, Model: model{Type: "virtio"}, Port: nicPort{Isolated: "yes"}}
 	if !slices.Equal(d.Devices.Interfaces, []nic{want}) {
 		t.Errorf("interfaces %+v", d.Devices.Interfaces)
 	}

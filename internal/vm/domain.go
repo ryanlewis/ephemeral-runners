@@ -122,6 +122,13 @@ type nic struct {
 	Type   string    `xml:"type,attr"`
 	Source nicSource `xml:"source"`
 	Model  model     `xml:"model"`
+	Port   nicPort   `xml:"port"`
+}
+
+// nicPort isolates the VM's bridge port: isolated ports can't reach each
+// other, only the bridge's other ports, so one job can't reach another.
+type nicPort struct {
+	Isolated string `xml:"isolated,attr"`
 }
 
 type nicSource struct {
@@ -173,10 +180,11 @@ func filesFor(stateDir, name string) files {
 	}
 }
 
-// nicFor turns "network:<name>" or "bridge:<name>" into a virtio NIC.
+// nicFor turns "network:<name>" or "bridge:<name>" into an isolated
+// virtio NIC.
 func nicFor(network string) (nic, error) {
 	kind, name, _ := strings.Cut(network, ":")
-	n := nic{Type: kind, Model: model{Type: "virtio"}}
+	n := nic{Type: kind, Model: model{Type: "virtio"}, Port: nicPort{Isolated: "yes"}}
 	switch {
 	case name == "":
 	case kind == "network":
