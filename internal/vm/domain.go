@@ -76,6 +76,14 @@ type devices struct {
 	Disks       []disk       `xml:"disk"`
 	Interfaces  []nic        `xml:"interface"`
 	Serials     []serial     `xml:"serial"`
+	MemBalloon  memBalloon   `xml:"memballoon"`
+}
+
+// memBalloon lets the guest hand pages it has freed back to the host, so a
+// VM holds roughly what its job is using rather than its peak.
+type memBalloon struct {
+	Model             string `xml:"model,attr"`
+	FreePageReporting string `xml:"freePageReporting,attr"`
 }
 
 type controller struct {
@@ -231,6 +239,7 @@ func domainXML(s Spec, n nic) ([]byte, error) {
 				Type:   "file",
 				Source: serialSource{Path: f.serial},
 			}},
+			MemBalloon: memBalloon{Model: "virtio", FreePageReporting: "on"},
 		},
 	}
 	// Index 0 is the PCIe root, which libvirt adds itself.

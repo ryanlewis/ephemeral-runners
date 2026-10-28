@@ -180,8 +180,8 @@ type rig struct {
 	l     *Loop
 }
 
-// newRig makes a loop with the default sizes and budget and the given
-// number of spares.
+// newRig makes a loop with fixed sizes and budget, which the tests' budget
+// arithmetic relies on, and the given number of spares.
 func newRig(t *testing.T, spares int, extra string) *rig {
 	t.Helper()
 	cfg, err := config.Parse(fmt.Appendf(nil, `{
@@ -189,6 +189,12 @@ func newRig(t *testing.T, spares int, extra string) *rig {
 		"repos": [%q],
 		"labels": ["self-hosted", "linux", "x64", "example"],
 		"name_prefix": "ex",
+		"sizes": {
+			"small": {"vcpus": 2, "memory_gib": 4},
+			"medium": {"vcpus": 4, "memory_gib": 12},
+			"large": {"vcpus": 8, "memory_gib": 20}
+		},
+		"budget": {"vcpus": 24, "memory_gib": 32},
 		"spares": {"size": "medium", "count": %d, "idle_after": "2m"}
 		%s
 	}`, repo, spares, extra))

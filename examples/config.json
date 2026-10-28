@@ -10,12 +10,12 @@
   "name_prefix": "example",
   "poll_interval": "5s",
   "sizes": {
-    "small": {"vcpus": 2, "memory_gib": 4},
-    "medium": {"vcpus": 4, "memory_gib": 12},
-    "large": {"vcpus": 8, "memory_gib": 20}
+    "small": {"vcpus": 2, "memory_gib": 2},
+    "medium": {"vcpus": 4, "memory_gib": 4},
+    "large": {"vcpus": 8, "memory_gib": 8}
   },
   "default_size": "medium",
-  "budget": {"vcpus": 24, "memory_gib": 32},
+  "budget": {"vcpus": 24, "memory_gib": 28},
   "spares": {"size": "medium", "count": 4, "idle_after": "20m"},
   "vm": {
     "image": "/var/lib/ephemeral-runners/images/current.qcow2",
