@@ -231,6 +231,9 @@ func TestNotModified(t *testing.T) {
 		w.Header().Set("X-RateLimit-Reset", "1800003600")
 		w.Header().Set("X-RateLimit-Resource", "core")
 		if r.Header.Get("If-None-Match") == `"v1"` {
+			// Headers on a 304 must not replace the counted ones.
+			w.Header().Set("X-RateLimit-Remaining", "4999")
+			w.Header().Set("X-RateLimit-Reset", "1800009999")
 			w.WriteHeader(http.StatusNotModified)
 			return
 		}
