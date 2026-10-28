@@ -168,7 +168,8 @@ type APIError struct {
 	StatusCode int
 	// Message is GitHub's error message, if the body had one.
 	Message string
-	// RateLimited is set for a 429, or a 403 with no requests remaining.
+	// RateLimited is set for a 429, or a 403 with no requests remaining or
+	// with a Retry-After header, which GitHub sends for a secondary limit.
 	RateLimited bool
 }
 
@@ -211,7 +212,8 @@ func newAPIError(req *http.Request, resp *http.Response, body []byte) *APIError 
 		e.Message = e.Message[:200]
 	}
 	e.RateLimited = resp.StatusCode == http.StatusTooManyRequests ||
-		(resp.StatusCode == http.StatusForbidden && resp.Header.Get("X-RateLimit-Remaining") == "0")
+		(resp.StatusCode == http.StatusForbidden &&
+			(resp.Header.Get("X-RateLimit-Remaining") == "0" || resp.Header.Get("Retry-After") != ""))
 	return e
 }
 
@@ -278,7 +280,9 @@ func (c *Client) send(ctx context.Context, method, u, auth string, body, out any
 	c.requests.Add(1)
 	// A 304 is not counted, and its rate limit headers do not match the
 	// core limit that counted responses report, so only those update it.
-	if resp.StatusCode != http.StatusNotModified {
+	// Requests signed with the App JWT draw on the App's own limit, not
+	// the installation's, so they are left out too.
+	if resp.StatusCode != http.StatusNotModified && !strings.HasPrefix(auth, "Bearer ") {
 		c.noteRateLimit(resp.Header)
 	}
 
