@@ -149,6 +149,13 @@ func TestCreateCold(t *testing.T) {
 	if d.CPU.Mode != "host-passthrough" {
 		t.Errorf("cpu mode %q", d.CPU.Mode)
 	}
+	var wantPorts []controller
+	for i := 1; i <= rootPorts; i++ {
+		wantPorts = append(wantPorts, controller{Type: "pci", Index: i, Model: "pcie-root-port"})
+	}
+	if !slices.Equal(d.Devices.Controllers, wantPorts) {
+		t.Errorf("controllers %+v, want root ports to spare for hot-plug", d.Devices.Controllers)
+	}
 	if d.OnPoweroff != "destroy" {
 		t.Errorf("on_poweroff %q", d.OnPoweroff)
 	}
@@ -527,5 +534,58 @@ func TestConcurrentCreates(t *testing.T) {
 		if err != nil {
 			t.Error(err)
 		}
+	}
+}
+
+// virsh create can fail after libvirt has started the domain, for example
+// when ctx ends while it runs. Create must not leave a running domain
+// whose files it has deleted.
+func TestCreateFailureDestroysDomain(t *testing.T) {
+	s := testSpec(t)
+	fr := &fakeRunner{err: map[string]error{"virsh create": errors.New("signal: killed")}}
+	l := &Launcher{URI: "qemu:///system", Runner: fr}
+	if err := l.Create(context.Background(), s); err == nil {
+		t.Fatal("no error")
+	}
+	cmds := fr.commands()
+	if want := "virsh -c qemu:///system destroy " + s.Name; cmds[len(cmds)-1] != want {
+		t.Errorf("last command %q, want %q", cmds[len(cmds)-1], want)
+	}
+}
+
+func TestPruneSkipsVMsBeingCreatedUnderAnotherPath(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "state")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	s := testSpec(t)
+	s.StateDir = real
+	l := &Launcher{}
+	pruned := make(chan []string, 1)
+	fr := &fakeRunner{}
+	fr.hook = func(args []string) {
+		if args[0] == "qemu-img" {
+			removed, _ := l.Prune(context.Background(), link, "er-")
+			pruned <- removed
+		}
+	}
+	l.Runner = fr
+	if err := l.Create(context.Background(), s); err != nil {
+		t.Fatal(err)
+	}
+	if removed := <-pruned; len(removed) != 0 {
+		t.Errorf("prune removed %q during create", removed)
+	}
+}
+
+func TestExecRunsInCLocale(t *testing.T) {
+	t.Setenv("LC_ALL", "de_DE.UTF-8")
+	out, err := Exec{}.Run(context.Background(), "sh", "-c", "echo $LC_ALL")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(out)); got != "C" {
+		t.Errorf("LC_ALL=%q, want C", got)
 	}
 }

@@ -52,8 +52,12 @@ type Runner interface {
 // Exec runs commands on the host.
 type Exec struct{}
 
+// Run runs the command in the C locale, so the error messages Destroy
+// looks for are not translated.
 func (Exec) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
-	return exec.CommandContext(ctx, name, args...).CombinedOutput()
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Env = append(os.Environ(), "LC_ALL=C")
+	return cmd.CombinedOutput()
 }
 
 // Launcher manages runner VMs on one libvirt connection. It is safe for
@@ -63,7 +67,7 @@ type Launcher struct {
 	Runner Runner // nil means Exec
 
 	mu       sync.Mutex
-	creating map[string]int // VM directories being set up, by path
+	creating map[string]int // VMs being set up, by name
 }
 
 var validName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
@@ -121,8 +125,8 @@ func (l *Launcher) Create(ctx context.Context, s Spec) (err error) {
 	}
 
 	f := filesFor(s.StateDir, s.Name)
-	l.begin(f.dir)
-	defer l.end(f.dir)
+	l.begin(s.Name)
+	defer l.end(s.Name)
 
 	if err := os.MkdirAll(s.StateDir, 0o755); err != nil {
 		return fmt.Errorf("vm %s: %w", s.Name, err)
@@ -150,6 +154,9 @@ func (l *Launcher) Create(ctx context.Context, s Spec) (err error) {
 		return fmt.Errorf("vm %s: %w", s.Name, err)
 	}
 	if out, err := l.virsh(ctx, "create", f.xml); err != nil {
+		// The domain may have started before virsh failed, such as when
+		// ctx ended. Make sure it is gone before its files are.
+		l.Destroy(context.WithoutCancel(ctx), s.Name)
 		return cmdError("vm "+s.Name+": virsh create", out, err)
 	}
 	return nil
@@ -250,8 +257,8 @@ func (l *Launcher) Prune(ctx context.Context, stateDir, prefix string) ([]string
 	// being created now, or was started before List runs.
 	l.mu.Lock()
 	busy := make(map[string]bool, len(l.creating))
-	for dir := range l.creating {
-		busy[dir] = true
+	for name := range l.creating {
+		busy[name] = true
 	}
 	l.mu.Unlock()
 	running, err := l.List(ctx, prefix)
@@ -264,7 +271,7 @@ func (l *Launcher) Prune(ctx context.Context, stateDir, prefix string) ([]string
 	for _, e := range entries {
 		name := e.Name()
 		dir := filepath.Join(abs, name)
-		if !e.IsDir() || !strings.HasPrefix(name, prefix) || busy[dir] || slices.Contains(running, name) {
+		if !e.IsDir() || !strings.HasPrefix(name, prefix) || busy[name] || slices.Contains(running, name) {
 			continue
 		}
 		if err := os.RemoveAll(dir); err != nil {
@@ -276,20 +283,20 @@ func (l *Launcher) Prune(ctx context.Context, stateDir, prefix string) ([]string
 	return removed, errors.Join(errs...)
 }
 
-func (l *Launcher) begin(dir string) {
+func (l *Launcher) begin(name string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.creating == nil {
 		l.creating = make(map[string]int)
 	}
-	l.creating[dir]++
+	l.creating[name]++
 }
 
-func (l *Launcher) end(dir string) {
+func (l *Launcher) end(name string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.creating[dir]--; l.creating[dir] <= 0 {
-		delete(l.creating, dir)
+	if l.creating[name]--; l.creating[name] <= 0 {
+		delete(l.creating, name)
 	}
 }
 
