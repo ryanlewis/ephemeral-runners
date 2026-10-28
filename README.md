@@ -35,10 +35,14 @@ To pick up a new runner or rustup release, change the version and checksum in
 ## How a VM gets its job
 
 The VM runs `actions-runner.service` at boot. It reads a JIT runner config from
-a small raw disk the host attaches with serial `jitconfig`, then runs
-`run.sh --jitconfig` as the `runner` user. When the job finishes, or if there is
-no config, the VM powers off. Boot progress is written to the serial console as
-`RUNNER-START` and, without a config, `RUNNER-NOJIT`.
+a small raw disk with serial `jitconfig`, then runs `run.sh --jitconfig` as the
+`runner` user. When the job finishes, the VM powers off.
+
+The host either attaches the disk when it starts the VM, or starts the VM
+without it and hot-plugs the disk later. Until the disk appears, the VM waits
+for as long as it takes, so a booted VM can wait as a warm spare. The service
+writes its progress to the serial console: `RUNNER-WAIT` once if the disk was
+not there at boot, and `RUNNER-START` when it reads the config.
 
 Inside the VM, the `runner` user has passwordless sudo, as on the hosted runners.
 Nothing in the VM survives the job.
