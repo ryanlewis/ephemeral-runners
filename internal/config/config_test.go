@@ -15,7 +15,7 @@ func TestLoadExample(t *testing.T) {
 	if c.Repos[0] != "example-org/example-repo" || c.PollInterval.D() != 5*time.Second {
 		t.Errorf("unexpected config: %+v", c)
 	}
-	if c.Sizes["large"] != (Size{VCPUs: 8, MemoryGiB: 20}) {
+	if c.Sizes["large"] != (Size{VCPUs: 8, MemoryGiB: 8}) {
 		t.Errorf("large = %+v", c.Sizes["large"])
 	}
 	if c.Timeouts.Job.D() != 6*time.Hour || c.Spares.IdleAfter.D() != 20*time.Minute {
@@ -41,7 +41,7 @@ func TestDefaults(t *testing.T) {
 	if c.PollInterval.D() != 5*time.Second || c.DefaultSize != "medium" {
 		t.Errorf("poll %v default %q", c.PollInterval, c.DefaultSize)
 	}
-	if len(c.Sizes) != 3 || c.Budget != (Size{24, 32}) {
+	if len(c.Sizes) != 3 || c.Budget != (Size{24, 28}) {
 		t.Errorf("sizes %v budget %v", c.Sizes, c.Budget)
 	}
 	if c.Spares != (Spares{"medium", 4, Duration(20 * time.Minute)}) {
@@ -81,7 +81,7 @@ func TestErrors(t *testing.T) {
 		{"bad prefix", `"name_prefix": "example"`, `"name_prefix": "Ex ample"`, "name_prefix"},
 		{"unknown default size", `"name_prefix"`, `"default_size": "huge", "name_prefix"`, `default_size "huge" is not one of the sizes`},
 		{"unknown spare size", `"name_prefix"`, `"spares": {"size": "huge"}, "name_prefix"`, `spares.size "huge" is not one of the sizes`},
-		{"size over budget", `"name_prefix"`, `"budget": {"vcpus": 6, "memory_gib": 32}, "name_prefix"`, `size "large" (8 vCPU, 20 GiB) is larger than the budget`},
+		{"size over budget", `"name_prefix"`, `"budget": {"vcpus": 6, "memory_gib": 32}, "name_prefix"`, `size "large" (8 vCPU, 8 GiB) is larger than the budget`},
 		{"bad duration", `"name_prefix"`, `"poll_interval": "soon", "name_prefix"`, "invalid duration"},
 		{"unknown field", `"name_prefix"`, `"repo": [], "name_prefix"`, `unknown field "repo"`},
 		{"size also a label", `"example"]`, `"example", "large"]`, `size "large" is also in labels`},

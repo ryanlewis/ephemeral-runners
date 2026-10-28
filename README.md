@@ -138,6 +138,11 @@ not there at boot, and `RUNNER-START` when it reads the config.
 Inside the VM, the `runner` user has passwordless sudo, as on the hosted runners.
 Nothing in the VM survives the job.
 
+The VM's memory size is a ceiling: the host only backs pages the guest
+touches. A virtio balloon with free page reporting hands pages the guest frees
+back to the host while the job runs. Page cache still counts as in use, so set
+`budget.memory_gib` a few GiB below the host's memory.
+
 ## Running the service
 
 ```sh

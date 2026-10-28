@@ -97,9 +97,9 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 // DefaultSizes are the sizes used when the file has none.
 func DefaultSizes() map[string]Size {
 	return map[string]Size{
-		"small":  {VCPUs: 2, MemoryGiB: 4},
-		"medium": {VCPUs: 4, MemoryGiB: 12},
-		"large":  {VCPUs: 8, MemoryGiB: 20},
+		"small":  {VCPUs: 2, MemoryGiB: 2},
+		"medium": {VCPUs: 4, MemoryGiB: 4},
+		"large":  {VCPUs: 8, MemoryGiB: 8},
 	}
 }
 
@@ -108,7 +108,7 @@ func defaults() Config {
 		GitHub:       GitHub{APIURL: "https://api.github.com"},
 		PollInterval: Duration(5 * time.Second),
 		DefaultSize:  "medium",
-		Budget:       Size{VCPUs: 24, MemoryGiB: 32},
+		Budget:       Size{VCPUs: 24, MemoryGiB: 28},
 		Spares:       Spares{Size: "medium", Count: 4, IdleAfter: Duration(20 * time.Minute)},
 		VM: VM{
 			Image:      "/var/lib/ephemeral-runners/images/current.qcow2",

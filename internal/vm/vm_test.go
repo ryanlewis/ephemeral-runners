@@ -192,6 +192,9 @@ func TestCreateCold(t *testing.T) {
 	if !slices.Equal(d.Devices.Serials, []serial{wantSerial}) {
 		t.Errorf("serials %+v", d.Devices.Serials)
 	}
+	if want := (memBalloon{Model: "virtio", FreePageReporting: "on"}); d.Devices.MemBalloon != want {
+		t.Errorf("memballoon %+v, want %+v", d.Devices.MemBalloon, want)
+	}
 	raw, _ := os.ReadFile(filepath.Join(dir, "domain.xml"))
 	if bytes.Contains(raw, []byte("graphics")) {
 		t.Error("domain has graphics")
