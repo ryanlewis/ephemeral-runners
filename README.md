@@ -32,6 +32,89 @@ It needs `libguestfs-tools` and `qemu-utils`. It:
 To pick up a new runner or rustup release, change the version and checksum in
 `image/versions.env` together.
 
+## Install
+
+The service runs under systemd as its own user, `ephemeral-runners`. That user
+is the only one that can read the GitHub App key.
+
+**Prerequisites.** A Linux host with KVM (`/dev/kvm` exists), libvirt with the
+`qemu:///system` connection and a network for the VMs, `libguestfs-tools` and
+`qemu-utils` for the image build, and Go. On Debian:
+
+```sh
+sudo apt install libvirt-daemon-system libvirt-clients qemu-system-x86 \
+  qemu-utils ovmf libguestfs-tools golang
+```
+
+**1. Install the program.** From a checkout, as root:
+
+```sh
+sudo deploy/install.sh
+```
+
+This builds the binary with the host's Go and installs it to
+`/usr/local/bin/ephemeral-runners`. It also installs the systemd unit, creates
+the `ephemeral-runners` user (in the `libvirt` and `kvm` groups) and creates
+these directories:
+
+| Path | Owner | Mode | Holds |
+| --- | --- | --- | --- |
+| `/etc/ephemeral-runners` | `root:ephemeral-runners` | 0750 | config, key |
+| `/var/lib/ephemeral-runners` | `root` | 0755 | images |
+| `/var/lib/ephemeral-runners/vms` | `ephemeral-runners` | 0755 | per-VM state |
+
+It does not write the config or start the service.
+
+**2. Create the GitHub App.** Create an App, install it on the repos the
+runners will serve, and give it these repository permissions: Actions
+(read), Administration (read and write) and Metadata (read). Note the App ID and
+the installation ID, and generate a private key.
+
+**3. Install the key.** The key must be readable by the service user and nobody
+else:
+
+```sh
+sudo install -m 0440 -o root -g ephemeral-runners app.pem /etc/ephemeral-runners/app.pem
+```
+
+**4. Write the config.** Copy [`examples/config.json`](examples/config.json) to
+`/etc/ephemeral-runners/config.json` and edit it: the App and installation IDs,
+the repos, the labels, the VM sizes, the budget and the network. Check it as the service user, which
+can read the key:
+
+```sh
+sudo -u ephemeral-runners ephemeral-runners check
+```
+
+Two hosts must never share a `name_prefix` on the same repo: at startup, the
+service deletes every runner whose name starts with the prefix.
+
+**5. Build the image.** See [Image](#image). The config's `vm.image` points at
+the result.
+
+**6. Start the service.**
+
+```sh
+sudo systemctl enable --now ephemeral-runners
+journalctl -u ephemeral-runners -f
+```
+
+Restarting or stopping the service destroys its VMs and deletes their runners.
+This can take up to two minutes, and a job running at the time fails.
+
+The unit makes the system read-only for the service, except
+`/var/lib/ephemeral-runners`. If `metrics_file` is set, give the service write
+access to its directory with a drop-in (`sudo systemctl edit ephemeral-runners`):
+
+```ini
+[Service]
+ReadWritePaths=/var/lib/node_exporter/textfile
+```
+
+The directory must also be writable by the `ephemeral-runners` user.
+
+To update, pull, run `sudo deploy/install.sh` again and restart the service.
+
 ## How a VM gets its job
 
 The VM runs `actions-runner.service` at boot. It reads a JIT runner config from

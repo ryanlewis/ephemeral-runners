@@ -1,0 +1,42 @@
+[Unit]
+Description=Ephemeral GitHub Actions runners in KVM VMs
+Documentation=https://github.com/ryanlewis/ephemeral-runners
+After=network-online.target libvirtd.service
+Wants=network-online.target libvirtd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/ephemeral-runners run -config /etc/ephemeral-runners/config.json
+User=ephemeral-runners
+Group=ephemeral-runners
+SupplementaryGroups=libvirt kvm
+Restart=on-failure
+RestartSec=5s
+# On SIGTERM the service destroys its VMs and deletes their runners, which can
+# take up to about two minutes.
+TimeoutStopSec=150
+
+# The default umask stays: VM state directories must be readable by QEMU's user.
+# StateDirectory= is not used: it would chown the images, which root builds.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ReadWritePaths=/var/lib/ephemeral-runners
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target
