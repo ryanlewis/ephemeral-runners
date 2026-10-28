@@ -93,13 +93,14 @@ func (f *fakeGitHub) setRunner(name, status string, busy bool) {
 }
 
 type fakeVMs struct {
-	running   map[string]vm.Spec
-	created   []vm.Spec
-	attached  map[string]string // VM name -> jit config
-	destroyed []string
-	removed   []string
-	pruned    int
-	createErr error
+	running    map[string]vm.Spec
+	created    []vm.Spec
+	attached   map[string]string // VM name -> jit config
+	destroyed  []string
+	removed    []string
+	pruned     int
+	createErr  error
+	destroyErr error
 }
 
 func newFakeVMs() *fakeVMs {
@@ -138,6 +139,9 @@ func (f *fakeVMs) List(_ context.Context, prefix string) ([]string, error) {
 }
 
 func (f *fakeVMs) Destroy(_ context.Context, name string) error {
+	if f.destroyErr != nil {
+		return f.destroyErr
+	}
 	delete(f.running, name)
 	f.destroyed = append(f.destroyed, name)
 	return nil
@@ -727,5 +731,117 @@ func TestNoSecondVMWhileQueueLags(t *testing.T) {
 		if s.VCPUs == 4 && s.JITConfig != "" {
 			t.Errorf("cold medium VM %s for a job a spare has", s.Name)
 		}
+	}
+}
+
+// A job of an in-progress run is listed only every inProgressEvery. In
+// between, its runner must not count against another job: if it took that
+// job, its own would wait for it to finish.
+func TestRunnerForInProgressJobNotCountedAgainstAnother(t *testing.T) {
+	r := newRig(t, 0, "")
+	x := r.queue(time.Minute, "self-hosted", "small")
+	r.tick() // in-progress runs polled: a VM for x
+	a := r.vms.created[0].Name
+	// Queued runs only: x isn't listed, y in a new run is.
+	r.take(x)
+	y := r.queue(0, "self-hosted", "small")
+	r.clock.advance(5 * time.Second)
+	r.tick()
+	if len(r.vms.created) != 2 {
+		t.Errorf("created %d VMs for x and y, want 2", len(r.vms.created))
+	}
+	// Even if the runner for x takes y, x has a runner when it is listed.
+	r.gh.setRunner(a, "online", true)
+	r.take(y)
+	r.clock.advance(5 * time.Second)
+	r.tick()
+	r.gh.jobs[repo] = append(r.gh.jobs[repo], x)
+	r.clock.advance(20 * time.Second)
+	r.tick()
+	if len(r.vms.created) != 2 {
+		t.Errorf("created %d VMs, want 2", len(r.vms.created))
+	}
+}
+
+// Runners take any queued job of their labels. A job whose runner took
+// another one gets a VM once GitHub would have stopped listing it.
+func TestJobGetsVMAfterItsRunnerTookAnother(t *testing.T) {
+	r := newRig(t, 0, "")
+	x := r.queue(2*time.Minute, "self-hosted", "small")
+	r.queue(time.Minute, "self-hosted", "small") // y
+	r.tick()
+	a, b := r.l.machines[r.vms.created[0].Name], r.l.machines[r.vms.created[1].Name]
+	if a.jobID != x.ID {
+		a, b = b, a
+	}
+	r.gh.setRunner(b.runner, "online", true) // the runner for y takes x
+	r.take(x)
+	r.clock.advance(5 * time.Second)
+	r.tick()
+	// At the next poll of in-progress runs, z comes and the runner for x
+	// takes it, which leaves y.
+	r.clock.advance(25 * time.Second)
+	z := r.queue(0, "self-hosted", "small")
+	r.tick()
+	r.gh.setRunner(a.runner, "online", true)
+	r.take(z)
+	for range queueLag / (5 * time.Second) {
+		r.clock.advance(5 * time.Second)
+		r.tick()
+	}
+	if len(r.vms.created) != 3 {
+		t.Errorf("created %d VMs, want a third for y", len(r.vms.created))
+	}
+}
+
+// A secondary rate limit leaves requests remaining and says how long to
+// wait in Retry-After.
+func TestSecondaryRateLimitWait(t *testing.T) {
+	r := newRig(t, 0, "")
+	r.gh.jobsErr = fmt.Errorf("list runs: %w", &github.APIError{StatusCode: 403, RateLimited: true, RetryAfter: 30 * time.Second})
+	r.gh.rate = github.RateLimit{Remaining: 4000, Reset: r.clock.t.Add(50 * time.Minute)}
+	if got := r.tick(); got != 30*time.Second {
+		t.Errorf("wait %s, want 30s", got)
+	}
+	// Without Retry-After: a minute.
+	r.gh.jobsErr = fmt.Errorf("list runs: %w", &github.APIError{StatusCode: 429, RateLimited: true})
+	if got := r.tick(); got != time.Minute {
+		t.Errorf("wait %s, want 1m", got)
+	}
+}
+
+// No runner is registered while the image can't be found, such as during
+// a rebuild.
+func TestNoRunnerWithoutImage(t *testing.T) {
+	r := newRig(t, 0, "")
+	r.l.resolve = func(string) (string, error) { return "", errors.New("no such file") }
+	r.queue(0, "self-hosted", "small")
+	r.tick()
+	if len(r.gh.registered) != 0 || r.l.launchFailures != 1 {
+		t.Errorf("registered %q, launch failures %d", r.gh.registered, r.l.launchFailures)
+	}
+}
+
+// A spare that won't die keeps its room: the job waits.
+func TestNoRoomWhileSpareWontDie(t *testing.T) {
+	r := newRig(t, 2, "")
+	j := r.queue(0, "self-hosted", "small")
+	r.tick()
+	r.take(j)
+	r.vms.powerOff(r.vms.specsOfSize(2)[0].Name)
+	r.clock.advance(5 * time.Second)
+	r.tick()
+	r.vms.destroyErr = errors.New("libvirt busy")
+	r.clock.advance(5 * time.Second)
+	r.queue(0, "self-hosted", "large")
+	r.tick()
+	if len(r.vms.specsOfSize(8)) != 0 {
+		t.Errorf("large VM started beside two spares: %+v", r.vms.running)
+	}
+	r.vms.destroyErr = nil
+	r.clock.advance(5 * time.Second)
+	r.tick()
+	if len(r.vms.specsOfSize(8)) != 1 {
+		t.Errorf("no large VM once the spare could go: %+v", r.vms.running)
 	}
 }

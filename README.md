@@ -83,9 +83,9 @@ Every `poll_interval`, the service:
 6. writes the metrics to `metrics_file`, if set, in the Prometheus text
    format.
 
-If GitHub rate-limits it, it waits until the limit resets; after other
-GitHub errors it waits 5 seconds, doubling up to a minute. Running VMs
-carry on meanwhile.
+If GitHub rate-limits it, it waits as long as GitHub's `Retry-After`
+asks, or else until the limit resets; after other GitHub errors it waits
+5 seconds, doubling up to a minute. Running VMs carry on meanwhile.
 
 On start, it destroys every VM whose name starts with `<name_prefix>-`,
 deletes their files from `vm.state_dir`, and deletes that prefix's runners
