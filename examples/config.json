@@ -1,0 +1,28 @@
+{
+  "github": {
+    "app_id": 123456,
+    "installation_id": 12345678,
+    "private_key_file": "/etc/ephemeral-runners/app.pem",
+    "api_url": "https://api.github.com"
+  },
+  "repos": ["example-org/example-repo"],
+  "labels": ["self-hosted", "linux", "x64", "example"],
+  "name_prefix": "example",
+  "poll_interval": "5s",
+  "sizes": {
+    "small": {"vcpus": 2, "memory_gib": 4},
+    "medium": {"vcpus": 4, "memory_gib": 12},
+    "large": {"vcpus": 8, "memory_gib": 20}
+  },
+  "default_size": "medium",
+  "budget": {"vcpus": 24, "memory_gib": 32},
+  "spares": {"size": "medium", "count": 4, "idle_after": "20m"},
+  "vm": {
+    "image": "/var/lib/ephemeral-runners/images/current.qcow2",
+    "state_dir": "/var/lib/ephemeral-runners/vms",
+    "network": "network:default",
+    "libvirt_uri": "qemu:///system"
+  },
+  "timeouts": {"online": "3m", "idle": "10m", "job": "6h"},
+  "metrics_file": ""
+}
