@@ -223,11 +223,16 @@ func (c *Config) Validate() error {
 	if len(c.Sizes) == 0 {
 		bad("sizes is empty")
 	}
+	sizeSeen := map[string]string{}
 	for _, name := range c.SizeNames() {
 		s := c.Sizes[name]
 		if strings.TrimSpace(name) == "" {
 			bad("sizes has an empty name")
 		}
+		if other, ok := sizeSeen[strings.ToLower(name)]; ok {
+			bad("sizes %q and %q differ only in case", other, name)
+		}
+		sizeSeen[strings.ToLower(name)] = name
 		if s.VCPUs <= 0 || s.MemoryGiB <= 0 {
 			bad("size %q needs vcpus and memory_gib above zero", name)
 		}
