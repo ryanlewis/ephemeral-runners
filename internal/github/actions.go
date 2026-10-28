@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -94,6 +95,10 @@ func (c *Client) QueuedJobs(ctx context.Context, repo string) ([]Job, error) {
 				}
 			}
 		})
+		// A run deleted since it was listed has no jobs to serve.
+		if errors.Is(err, ErrNotFound) {
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}

@@ -353,6 +353,8 @@ func TestErrorMapping(t *testing.T) {
 		{502, nil, ErrServer},
 		{429, nil, ErrRateLimited},
 		{403, map[string]string{"X-RateLimit-Remaining": "0"}, ErrRateLimited},
+		// A secondary rate limit leaves requests remaining and sets Retry-After.
+		{403, map[string]string{"X-RateLimit-Remaining": "4000", "Retry-After": "60"}, ErrRateLimited},
 	}
 	all := []error{ErrUnauthorized, ErrForbidden, ErrNotFound, ErrUnprocessable, ErrRateLimited, ErrServer}
 	for _, tt := range tests {
@@ -419,6 +421,73 @@ func TestQueuedJobs(t *testing.T) {
 	}
 	if runCalls.Load() != 1 {
 		t.Errorf("run 100 listed %d times, want once", runCalls.Load())
+	}
+}
+
+// A run deleted between listing the runs and listing its jobs is skipped.
+func TestQueuedJobsSkipsDeletedRun(t *testing.T) {
+	f, srv := newFake(t, time.Now())
+	f.HandleFunc("GET /repos/example-org/example-repo/actions/runs", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("status") == "queued" {
+			io.WriteString(w, `{"workflow_runs":[{"id":100},{"id":200}]}`)
+			return
+		}
+		io.WriteString(w, `{"workflow_runs":[]}`)
+	})
+	f.HandleFunc("GET /repos/example-org/example-repo/actions/runs/100/jobs", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+	})
+	f.HandleFunc("GET /repos/example-org/example-repo/actions/runs/200/jobs", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"jobs":[{"id":3,"run_id":200,"name":"a","status":"queued","labels":["self-hosted"],"created_at":"2026-01-01T00:01:00Z"}]}`)
+	})
+	c := newClient(t, srv, nil)
+	jobs, err := c.QueuedJobs(context.Background(), "example-org/example-repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 || jobs[0].ID != 3 {
+		t.Errorf("jobs = %+v", jobs)
+	}
+}
+
+// The token endpoint reports the App's own rate limit, not the
+// installation's, so it must not replace the installation's state.
+func TestTokenResponseKeepsRateLimit(t *testing.T) {
+	start := time.Unix(1_800_000_000, 0)
+	var mu sync.Mutex
+	now := start
+	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	f := &fakeGitHub{ServeMux: http.NewServeMux()}
+	f.HandleFunc("POST /app/installations/7/access_tokens", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-RateLimit-Limit", "60")
+		w.Header().Set("X-RateLimit-Remaining", "59")
+		json.NewEncoder(w).Encode(map[string]any{"token": "tok", "expires_at": clock().Add(time.Hour)})
+	})
+	f.HandleFunc("GET /repos/example-org/example-repo/actions/runners/5", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"v1"`)
+		if r.Header.Get("If-None-Match") == `"v1"` {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("X-RateLimit-Limit", "5000")
+		w.Header().Set("X-RateLimit-Remaining", "4990")
+		io.WriteString(w, `{"id":5}`)
+	})
+	srv := httptest.NewServer(f)
+	t.Cleanup(srv.Close)
+	c := newClient(t, srv, clock)
+	ctx := context.Background()
+	if _, err := c.GetRunner(ctx, "example-org/example-repo", 5); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	now = start.Add(56 * time.Minute)
+	mu.Unlock()
+	if _, err := c.GetRunner(ctx, "example-org/example-repo", 5); err != nil {
+		t.Fatal(err)
+	}
+	if rl := c.RateLimit(); rl.Limit != 5000 || rl.Remaining != 4990 {
+		t.Errorf("rate limit = %+v, want the installation's 4990 of 5000", rl)
 	}
 }
 
