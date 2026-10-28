@@ -422,6 +422,15 @@ func TestQueuedJobs(t *testing.T) {
 	if runCalls.Load() != 1 {
 		t.Errorf("run 100 listed %d times, want once", runCalls.Load())
 	}
+
+	// Asking for queued runs only leaves out run 200's jobs.
+	jobs, err = c.QueuedJobs(context.Background(), "example-org/example-repo", "queued")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 || jobs[0].ID != 1 {
+		t.Errorf("queued runs only: jobs = %+v", jobs)
+	}
 }
 
 // A run deleted between listing the runs and listing its jobs is skipped.

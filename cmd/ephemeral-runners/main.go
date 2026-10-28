@@ -13,6 +13,7 @@ import (
 const usage = `usage: ephemeral-runners <command> [flags]
 
 commands:
+  run     run the runner loop until SIGINT or SIGTERM
   check   check the GitHub App setup and show queued jobs
 `
 
@@ -26,6 +27,8 @@ func main() {
 
 	var err error
 	switch os.Args[1] {
+	case "run":
+		err = runService(ctx, os.Args[2:])
 	case "check":
 		err = runCheck(ctx, os.Args[2:], os.Stdout)
 	default:
