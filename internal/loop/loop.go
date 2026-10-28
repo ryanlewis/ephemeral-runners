@@ -93,6 +93,7 @@ type machine struct {
 
 	// Set once the VM has a job config.
 	repo     string
+	jobID    int64 // the queued job it was launched for
 	runnerID int64
 	runner   string
 	assigned time.Time
@@ -188,9 +189,10 @@ func (l *Loop) Run(ctx context.Context) error {
 func (l *Loop) prefix() string { return l.cfg.NamePrefix + "-" }
 
 // Startup destroys every VM with the prefix, removes their files, and
-// deletes the prefix's runners in each repo. With their VMs gone, those
-// runners are dead even if GitHub still shows them online or busy, and
-// GitHub's delete removes them either way.
+// deletes the prefix's runners in each repo: with their VMs gone, they are
+// dead even if GitHub still shows them online. GitHub refuses to delete a
+// runner it thinks is running a job; it removes that one itself once the
+// job fails for want of its runner.
 func (l *Loop) Startup(ctx context.Context) error {
 	names, err := l.vms.List(ctx, l.prefix())
 	if err != nil {
@@ -217,6 +219,10 @@ func (l *Loop) Startup(ctx context.Context) error {
 		}
 		for _, r := range runners {
 			if !strings.HasPrefix(r.Name, l.prefix()) {
+				continue
+			}
+			if r.Busy {
+				l.log.Info("leaving leftover runner to GitHub: it still shows a job", "repo", repo, "runner", r.Name)
 				continue
 			}
 			if err := l.gh.DeleteRunner(ctx, repo, r.ID); err != nil && !errors.Is(err, github.ErrNotFound) {
@@ -460,17 +466,34 @@ func (l *Loop) kill(ctx context.Context, m *machine, why string) {
 // so do the younger ones behind it. GitHub errors are returned, so the tick
 // backs off; VM errors only count as failed launches.
 func (l *Loop) launch(ctx context.Context, now time.Time, jobs []job) error {
-	// Runners that are starting or idle will take a queued job of their
-	// repo and size, so count them against the oldest jobs.
+	// A job that a VM was launched for is covered while that VM lives:
+	// GitHub can show its runner busy before the job leaves the queued
+	// list. Other runners that are starting or idle will take a queued job
+	// of their repo and size, so count them against the oldest jobs left.
+	launchedFor := map[int64]*machine{}
+	for _, m := range l.machines {
+		if m.state == starting || m.state == idle || m.state == busy {
+			launchedFor[m.jobID] = m
+		}
+	}
+	covered := map[*machine]bool{}
+	for _, j := range jobs {
+		if m := launchedFor[j.ID]; m != nil {
+			covered[m] = true
+		}
+	}
 	supply := map[[2]string]int{}
 	for _, m := range l.machines {
-		if m.state == starting || m.state == idle {
+		if (m.state == starting || m.state == idle) && !covered[m] {
 			supply[[2]string{m.repo, m.size}]++
 		}
 	}
 	var wanted []job
 	for _, j := range jobs {
 		k := [2]string{j.repo, j.size}
+		if launchedFor[j.ID] != nil {
+			continue
+		}
 		if supply[k] > 0 {
 			supply[k]--
 			continue
@@ -581,7 +604,7 @@ func (l *Loop) handOver(ctx context.Context, now time.Time, s *machine, j job) e
 		l.kill(ctx, s, "failed to take a job config")
 		return nil
 	}
-	s.repo, s.runnerID, s.runner, s.assigned = j.repo, jit.RunnerID, name, now
+	s.repo, s.jobID, s.runnerID, s.runner, s.assigned = j.repo, j.ID, jit.RunnerID, name, now
 	l.jobsStarted++
 	l.setState(s, starting, "handed job to spare")
 	l.log.Info("launched", "vm", s.name, "runner", name, "repo", j.repo, "size", j.size,
@@ -609,7 +632,7 @@ func (l *Loop) coldStart(ctx context.Context, now time.Time, j job) error {
 	}
 	l.machines[name] = &machine{
 		name: name, size: j.size, image: image, created: now, state: starting,
-		repo: j.repo, runnerID: jit.RunnerID, runner: name, assigned: now,
+		repo: j.repo, jobID: j.ID, runnerID: jit.RunnerID, runner: name, assigned: now,
 	}
 	l.jobsStarted++
 	l.log.Info("launched", "vm", name, "runner", name, "repo", j.repo, "size", j.size,

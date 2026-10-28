@@ -522,7 +522,7 @@ func TestStartupCleansUp(t *testing.T) {
 	if r.vms.pruned != 1 {
 		t.Errorf("pruned %d times", r.vms.pruned)
 	}
-	if want := []int64{1, 2, 3}; !slices.Equal(r.gh.deleted, want) {
+	if want := []int64{1, 3}; !slices.Equal(r.gh.deleted, want) {
 		t.Errorf("deleted runners %v, want %v", r.gh.deleted, want)
 	}
 }
@@ -685,5 +685,47 @@ func TestSpareKeptForMediumBehindLarge(t *testing.T) {
 	// the other spare or the small job yet.
 	if len(r.vms.specsOfSize(8)) != 1 || len(r.vms.specsOfSize(2)) != 0 || len(r.l.spares()) != 0 {
 		t.Errorf("running %+v, spares %d", r.vms.running, len(r.l.spares()))
+	}
+}
+
+// GitHub can show a runner busy before its job leaves the queued list. The
+// job must not get a second VM in that window.
+func TestNoSecondVMWhileQueueLags(t *testing.T) {
+	r := newRig(t, 1, "")
+	r.queue(0, "self-hosted", "small")
+	r.tick()
+	small := r.vms.specsOfSize(2)[0].Name
+	r.gh.setRunner(small, "online", true)
+	r.clock.advance(5 * time.Second)
+	r.tick() // the job is still listed as queued
+	if n := len(r.vms.specsOfSize(2)); n != 1 {
+		t.Errorf("%d small VMs, want 1", n)
+	}
+
+	// The same for a job handed to a spare.
+	r.queue(0, "self-hosted", "medium")
+	r.clock.advance(5 * time.Second)
+	r.tick()
+	if len(r.vms.attached) != 1 {
+		t.Fatalf("attached %v", r.vms.attached)
+	}
+	var runner string
+	for _, m := range r.l.machines {
+		if m.state == starting && m.size == "medium" {
+			runner = m.runner
+		}
+	}
+	r.gh.setRunner(runner, "online", true)
+	r.clock.advance(5 * time.Second)
+	r.tick()
+	r.clock.advance(5 * time.Second)
+	r.tick()
+	if len(r.vms.attached) != 1 || len(r.vms.specsOfSize(4)) != 1+len(r.l.spares()) {
+		t.Errorf("second launch for the medium job: attached %v, running %v", r.vms.attached, r.vms.running)
+	}
+	for _, s := range r.vms.created {
+		if s.VCPUs == 4 && s.JITConfig != "" {
+			t.Errorf("cold medium VM %s for a job a spare has", s.Name)
+		}
 	}
 }
