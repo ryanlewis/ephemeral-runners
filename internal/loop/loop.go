@@ -65,6 +65,9 @@ const (
 	maxBackoff      = time.Minute
 	// rateLimitWait is the wait after a rate limit with no reset time.
 	rateLimitWait = time.Minute
+	// queueLag is how long GitHub can go on listing a job as queued after
+	// a runner has taken it.
+	queueLag = time.Minute
 	// shutdownTimeout bounds the clean-up on the way out.
 	shutdownTimeout = 2 * time.Minute
 )
@@ -98,6 +101,7 @@ type machine struct {
 	runner   string
 	assigned time.Time
 	online   time.Time
+	busy     time.Time // when the loop saw its runner take a job
 }
 
 type runnerRef struct {
@@ -137,6 +141,9 @@ type Loop struct {
 	pendingDeletes []runnerRef
 	lastJob        time.Time // when a job this host serves was last seen
 	lastInProgress time.Time // when in-progress runs were last polled
+	// inProgressJobs are the jobs seen when in-progress runs were last
+	// polled. Ticks in between don't see jobs of in-progress runs.
+	inProgressJobs []int64
 	backoff        time.Duration
 
 	jobsStarted    int64
@@ -292,11 +299,19 @@ func (l *Loop) Tick(ctx context.Context) time.Duration {
 	return l.cfg.PollInterval.D()
 }
 
-// failed logs a GitHub error and returns how long to wait: until the rate
-// limit resets, or a backoff that doubles from 5 s up to a minute.
+// failed logs a GitHub error and returns how long to wait: what a rate
+// limit asks for, or a backoff that doubles from 5 s up to a minute.
 func (l *Loop) failed(err error, now time.Time) time.Duration {
 	if errors.Is(err, github.ErrRateLimited) {
-		wait := l.gh.RateLimit().Reset.Sub(now)
+		// A secondary limit says how long to wait in Retry-After, and
+		// leaves the primary limit's requests remaining.
+		var wait time.Duration
+		var apiErr *github.APIError
+		if rl := l.gh.RateLimit(); errors.As(err, &apiErr) && apiErr.RetryAfter > 0 {
+			wait = apiErr.RetryAfter
+		} else if rl.Remaining == 0 {
+			wait = rl.Reset.Sub(now)
+		}
 		if wait <= 0 {
 			wait = rateLimitWait
 		}
@@ -372,6 +387,10 @@ func (l *Loop) poll(ctx context.Context, now time.Time) ([]job, error) {
 	}
 	if inProgress {
 		l.lastInProgress = now
+		l.inProgressJobs = l.inProgressJobs[:0]
+		for _, j := range jobs {
+			l.inProgressJobs = append(l.inProgressJobs, j.ID)
+		}
 	}
 	slices.SortStableFunc(jobs, func(a, b job) int { return a.CreatedAt.Compare(b.CreatedAt) })
 	if len(jobs) > 0 {
@@ -403,9 +422,9 @@ func (l *Loop) checkRunners(ctx context.Context, now time.Time) error {
 			switch {
 			case i < 0:
 				// GitHub removes a JIT runner once its job is done.
-				l.setState(m, busy, "runner gone from GitHub")
+				l.setBusy(m, now, "runner gone from GitHub")
 			case runners[i].Busy:
-				l.setState(m, busy, "runner took a job")
+				l.setBusy(m, now, "runner took a job")
 			case runners[i].Status == "online" && m.state == starting:
 				m.online = now
 				l.setState(m, idle, "runner online")
@@ -413,6 +432,13 @@ func (l *Loop) checkRunners(ctx context.Context, now time.Time) error {
 		}
 	}
 	return nil
+}
+
+func (l *Loop) setBusy(m *machine, now time.Time, why string) {
+	if m.state != busy {
+		m.busy = now
+	}
+	l.setState(m, busy, why)
 }
 
 func (l *Loop) setState(m *machine, s state, why string) {
@@ -445,18 +471,19 @@ func (l *Loop) timeouts(ctx context.Context, now time.Time) {
 	}
 }
 
-// kill destroys a VM and deletes its runner. reap removes its files once
-// it has gone from the list.
-func (l *Loop) kill(ctx context.Context, m *machine, why string) {
+// kill destroys a VM and deletes its runner, and reports whether the VM is
+// gone. reap removes its files once it has gone from the list.
+func (l *Loop) kill(ctx context.Context, m *machine, why string) bool {
 	if err := l.vms.Destroy(ctx, m.name); err != nil {
 		l.log.Warn("destroy VM", "vm", m.name, "err", err)
-		return
+		return false
 	}
 	if m.runnerID != 0 {
 		l.deleteRunner(ctx, m.repo, m.runnerID)
 		m.runnerID = 0
 	}
 	l.setState(m, killed, "destroyed: "+why)
+	return true
 }
 
 // launch starts a runner for each job that no runner is coming for. Jobs of
@@ -466,19 +493,29 @@ func (l *Loop) kill(ctx context.Context, m *machine, why string) {
 // so do the younger ones behind it. GitHub errors are returned, so the tick
 // backs off; VM errors only count as failed launches.
 func (l *Loop) launch(ctx context.Context, now time.Time, jobs []job) error {
-	// A job that a VM was launched for is covered while that VM lives:
-	// GitHub can show its runner busy before the job leaves the queued
-	// list. Other runners that are starting or idle will take a queued job
-	// of their repo and size, so count them against the oldest jobs left.
+	// A job that a VM was launched for is covered while that VM is
+	// starting or idle, and for queueLag after its runner takes a job:
+	// GitHub can show the runner busy before the job leaves the queued
+	// list. After that, the runner took another job of the same labels,
+	// and this one needs a VM of its own. A job seen at the last poll of
+	// in-progress runs may still be queued, so it covers its VM between
+	// those polls too. Other runners that are starting or idle will take
+	// a queued job of their repo and size, so count them against the
+	// oldest jobs left.
 	launchedFor := map[int64]*machine{}
 	for _, m := range l.machines {
-		if m.state == starting || m.state == idle || m.state == busy {
+		if m.state == starting || m.state == idle || (m.state == busy && now.Sub(m.busy) < queueLag) {
 			launchedFor[m.jobID] = m
 		}
 	}
 	covered := map[*machine]bool{}
 	for _, j := range jobs {
 		if m := launchedFor[j.ID]; m != nil {
+			covered[m] = true
+		}
+	}
+	for _, id := range l.inProgressJobs {
+		if m := launchedFor[id]; m != nil {
 			covered[m] = true
 		}
 	}
@@ -518,7 +555,9 @@ func (l *Loop) launch(ctx context.Context, now time.Time, jobs []job) error {
 			l.log.Debug("job waits for room in the budget", "repo", j.repo, "job", j.ID, "size", j.size)
 			return nil
 		}
-		l.makeRoom(ctx, size)
+		if !l.makeRoom(ctx, size) {
+			return nil
+		}
 		if err := l.coldStart(ctx, now, j); err != nil {
 			return err
 		}
@@ -569,8 +608,9 @@ func (l *Loop) freeSpare(size string) *machine {
 }
 
 // makeRoom destroys spares, newest first, until a VM of size fits in the
-// budget alongside the VMs with jobs and the spares that are left.
-func (l *Loop) makeRoom(ctx context.Context, size config.Size) {
+// budget alongside the VMs with jobs and the spares that are left. It
+// reports false if a spare it had to destroy is still running.
+func (l *Loop) makeRoom(ctx context.Context, size config.Size) bool {
 	spareSize := l.cfg.Sizes[l.cfg.Spares.Size]
 	spares := l.spares()
 	for len(spares) > 0 {
@@ -578,11 +618,14 @@ func (l *Loop) makeRoom(ctx context.Context, size config.Size) {
 		n := len(spares)
 		if u.VCPUs+n*spareSize.VCPUs+size.VCPUs <= l.cfg.Budget.VCPUs &&
 			u.MemoryGiB+n*spareSize.MemoryGiB+size.MemoryGiB <= l.cfg.Budget.MemoryGiB {
-			return
+			return true
 		}
-		l.kill(ctx, spares[n-1], "making room for a job")
+		if !l.kill(ctx, spares[n-1], "making room for a job") {
+			return false
+		}
 		spares = spares[:n-1]
 	}
+	return true
 }
 
 func (l *Loop) labels(size string) []string {
@@ -614,17 +657,19 @@ func (l *Loop) handOver(ctx context.Context, now time.Time, s *machine, j job) e
 
 // coldStart registers a runner for j and boots a VM with its config.
 func (l *Loop) coldStart(ctx context.Context, now time.Time, j job) error {
+	image, err := l.resolve(l.cfg.VM.Image)
+	if err != nil {
+		l.launchFailures++
+		l.log.Warn("resolve image", "image", l.cfg.VM.Image, "err", err)
+		return nil
+	}
 	name := l.newName(repoName(j.repo) + "-" + j.size)
 	jit, err := l.gh.GenerateJITConfig(ctx, j.repo, name, l.labels(j.size))
 	if err != nil {
 		l.launchFailures++
 		return fmt.Errorf("%s: generate JIT config: %w", j.repo, err)
 	}
-	image, err := l.resolve(l.cfg.VM.Image)
-	if err == nil {
-		err = l.vms.Create(ctx, l.spec(name, j.size, image, jit.EncodedConfig))
-	}
-	if err != nil {
+	if err := l.vms.Create(ctx, l.spec(name, j.size, image, jit.EncodedConfig)); err != nil {
 		l.launchFailures++
 		l.log.Warn("start VM", "vm", name, "err", err)
 		l.deleteRunner(ctx, j.repo, jit.RunnerID)
