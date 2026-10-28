@@ -48,9 +48,13 @@ func repoPath(repo string) (string, error) {
 }
 
 // QueuedJobs returns the jobs in repo that are waiting for a runner, oldest
-// first. It looks at the runs that are queued or in progress, since an
-// in-progress run can still have queued jobs.
-func (c *Client) QueuedJobs(ctx context.Context, repo string) ([]Job, error) {
+// first. It looks at the runs with the given statuses, by default those that
+// are queued or in progress, since an in-progress run can still have queued
+// jobs.
+func (c *Client) QueuedJobs(ctx context.Context, repo string, runStatuses ...string) ([]Job, error) {
+	if len(runStatuses) == 0 {
+		runStatuses = []string{"queued", "in_progress"}
+	}
 	rp, err := repoPath(repo)
 	if err != nil {
 		return nil, err
@@ -62,7 +66,7 @@ func (c *Client) QueuedJobs(ctx context.Context, repo string) ([]Job, error) {
 	}
 	var runIDs []int64
 	seen := map[int64]bool{}
-	for _, status := range []string{"queued", "in_progress"} {
+	for _, status := range runStatuses {
 		err := getAll(ctx, c, rp+"/actions/runs?status="+status+"&per_page=100", func(p runsPage) {
 			for _, r := range p.WorkflowRuns {
 				if !seen[r.ID] {
