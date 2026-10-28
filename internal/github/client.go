@@ -103,7 +103,7 @@ type RateLimit struct {
 }
 
 // RateLimit returns the rate limit headers from the latest response that
-// had them. It is the zero value before any such response.
+// had them, leaving out 304s. It is the zero value before any such response.
 func (c *Client) RateLimit() RateLimit {
 	c.rateMu.Lock()
 	defer c.rateMu.Unlock()
@@ -275,7 +275,11 @@ func (c *Client) send(ctx context.Context, method, u, auth string, body, out any
 		return nil, fmt.Errorf("%s %s: read body: %w", method, req.URL.Redacted(), err)
 	}
 	c.requests.Add(1)
-	c.noteRateLimit(resp.Header)
+	// A 304 is not counted, and its rate limit headers do not match the
+	// core limit that counted responses report, so only those update it.
+	if resp.StatusCode != http.StatusNotModified {
+		c.noteRateLimit(resp.Header)
+	}
 
 	switch {
 	case resp.StatusCode == http.StatusNotModified && cached != nil:
