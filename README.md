@@ -87,7 +87,12 @@ sudo -u ephemeral-runners ephemeral-runners check
 ```
 
 Two hosts must never share a `name_prefix` on the same repo: at startup, the
-service deletes every runner whose name starts with the prefix.
+service deletes every runner whose name starts with `<name_prefix>-`. For the
+same reason, prefixes used on one repo must not start with each other, as
+`example` and `example-x` do.
+
+Every job's `runs-on` should carry an explicit size label (one of the names in
+`sizes`). A job with no size label can be taken by a runner of any size.
 
 **5. Build the image.** See [Image](#image). The config's `vm.image` points at
 the result.
