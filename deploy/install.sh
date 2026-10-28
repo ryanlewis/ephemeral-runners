@@ -26,7 +26,7 @@ if [[ -z $binary ]]; then
   trap 'rm -rf "$build"' EXIT
   binary=$build/ephemeral-runners
   (cd "$root" && CGO_ENABLED=0 go build -trimpath -buildvcs=false -o "$binary" ./cmd/ephemeral-runners)
-elif [[ ! -x $binary ]]; then
+elif [[ ! -f $binary || ! -x $binary ]]; then
   echo "$binary is not an executable file" >&2
   exit 1
 fi
