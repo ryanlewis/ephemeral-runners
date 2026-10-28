@@ -32,4 +32,4 @@ jobs:
         with:
           persist-credentials: false
       - name: Shellcheck
-        run: shellcheck -x -S warning image/*.sh image/files/usr/local/sbin/*
+        run: shellcheck -x -S warning image/*.sh image/files/usr/local/sbin/* deploy/*.sh
