@@ -89,8 +89,10 @@ carry on meanwhile.
 
 On start, it destroys every VM whose name starts with `<name_prefix>-`,
 deletes their files from `vm.state_dir`, and deletes that prefix's runners
-in each repo. A job that was running in one of those VMs fails and can be
-re-run.
+in each repo. GitHub refuses to delete a runner that it still shows running
+a job: the job fails once GitHub notices its runner has gone, and GitHub
+then removes the runner itself. The job can be re-run.
 
 On SIGINT or SIGTERM, it stops launching, destroys its VMs, deletes their
-runners and files, and exits.
+runners and files, and exits. A runner that was running a job is left to
+GitHub, as on start.
