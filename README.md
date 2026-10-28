@@ -46,15 +46,17 @@ sudo apt install libvirt-daemon-system libvirt-clients qemu-system-x86 \
   qemu-utils ovmf libguestfs-tools golang
 ```
 
-**1. Install the program.** From a checkout, as root:
+**1. Install the program.** From a checkout, build the binary as a normal user
+(or cross-compile it on another machine), then install it as root:
 
 ```sh
-sudo deploy/install.sh
+CGO_ENABLED=0 go build -trimpath -o ephemeral-runners ./cmd/ephemeral-runners
+sudo deploy/install.sh ./ephemeral-runners
 ```
 
-This builds the binary with the host's Go and installs it to
-`/usr/local/bin/ephemeral-runners`. It also installs the systemd unit, creates
-the `ephemeral-runners` user (in the `libvirt` and `kvm` groups) and creates
+This installs the binary to `/usr/local/bin/ephemeral-runners`. (Without an
+argument, `install.sh` builds with the `go` on root's PATH.) It also installs
+the systemd unit, creates the `ephemeral-runners` user (in the `libvirt` and `kvm` groups) and creates
 these directories:
 
 | Path | Owner | Mode | Holds |
@@ -118,7 +120,8 @@ ReadWritePaths=/var/lib/node_exporter/textfile
 
 The directory must also be writable by the `ephemeral-runners` user.
 
-To update, pull, run `sudo deploy/install.sh` again and restart the service.
+To update, pull, build again, run `sudo deploy/install.sh ./ephemeral-runners`
+and restart the service.
 
 ## How a VM gets its job
 

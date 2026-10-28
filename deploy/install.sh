@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# Build ephemeral-runners and install it as a systemd service. Run as root from
-# a checkout. It does not write config.json, or enable or start the service.
+# Install ephemeral-runners as a systemd service. Run as root from a checkout.
+# It does not write config.json, or enable or start the service.
 #
-# Usage: install.sh
+# Usage: install.sh [binary]
+#
+# With a binary (built beforehand with go build), it installs that. Without
+# one, it builds the program with the go on root's PATH.
 set -euo pipefail
 
 if [[ $EUID -ne 0 ]]; then
@@ -13,18 +16,22 @@ fi
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/.." && pwd)
 
-if ! command -v go >/dev/null; then
-  echo "go is not installed or not on PATH" >&2
+binary=${1:-}
+if [[ -z $binary ]]; then
+  if ! command -v go >/dev/null; then
+    echo "go is not on root's PATH: build the binary first and pass its path" >&2
+    exit 1
+  fi
+  build=$(mktemp -d)
+  trap 'rm -rf "$build"' EXIT
+  binary=$build/ephemeral-runners
+  (cd "$root" && CGO_ENABLED=0 go build -trimpath -buildvcs=false -o "$binary" ./cmd/ephemeral-runners)
+elif [[ ! -x $binary ]]; then
+  echo "$binary is not an executable file" >&2
   exit 1
 fi
 
-build=$(mktemp -d)
-trap 'rm -rf "$build"' EXIT
-
-(cd "$root" && CGO_ENABLED=0 go build -trimpath -buildvcs=false \
-  -o "$build/ephemeral-runners" ./cmd/ephemeral-runners)
-
-install -D -m 0755 "$build/ephemeral-runners" /usr/local/bin/ephemeral-runners
+install -D -m 0755 "$binary" /usr/local/bin/ephemeral-runners
 install -D -m 0644 "$here/ephemeral-runners.service" /etc/systemd/system/ephemeral-runners.service
 install -D -m 0644 "$here/sysusers.conf" /etc/sysusers.d/ephemeral-runners.conf
 install -D -m 0644 "$here/tmpfiles.conf" /etc/tmpfiles.d/ephemeral-runners.conf
