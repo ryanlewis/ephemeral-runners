@@ -292,6 +292,41 @@ func TestListRunnersPaginates(t *testing.T) {
 	}
 }
 
+// GitHub leaves the Link header off a 304, so the next page has to come
+// from the cached response.
+func TestPaginatesAfterNotModified(t *testing.T) {
+	f, srv := newFake(t, time.Now())
+	f.HandleFunc("GET /repos/example-org/example-repo/actions/runners", func(w http.ResponseWriter, r *http.Request) {
+		page := r.URL.Query().Get("page")
+		etag := `"p` + page + `"`
+		if r.Header.Get("If-None-Match") == etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("ETag", etag)
+		switch page {
+		case "":
+			w.Header().Set("Link", fmt.Sprintf(`<%s/repos/example-org/example-repo/actions/runners?per_page=100&page=2>; rel="next"`, "http://"+r.Host))
+			io.WriteString(w, `{"runners":[{"id":1,"name":"a"},{"id":2,"name":"b"}]}`)
+		case "2":
+			io.WriteString(w, `{"runners":[{"id":3,"name":"c"}]}`)
+		}
+	})
+	c := newClient(t, srv, nil)
+	for i := 1; i <= 2; i++ {
+		rs, err := c.ListRunners(context.Background(), "example-org/example-repo")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rs) != 3 {
+			t.Errorf("call %d: %d runners, want 3", i, len(rs))
+		}
+	}
+	if n := c.Stats().NotModified; n != 2 {
+		t.Errorf("%d not modified, want 2", n)
+	}
+}
+
 func TestNextLinkToOtherHostRefused(t *testing.T) {
 	f, srv := newFake(t, time.Now())
 	f.HandleFunc("GET /repos/example-org/example-repo/actions/runners", func(w http.ResponseWriter, r *http.Request) {
@@ -430,7 +465,7 @@ func TestBadRepo(t *testing.T) {
 func TestETagCacheEvicts(t *testing.T) {
 	var c etagCache
 	for i := range maxCached + 10 {
-		c.put(fmt.Sprint(i), "e", nil)
+		c.put(fmt.Sprint(i), "e", "", nil)
 		c.get("0") // keep the first entry in use
 	}
 	if c.len() != maxCached {

@@ -237,7 +237,8 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) (ht
 
 // send makes one HTTP request and decodes a JSON response into out. A GET
 // sends the ETag of its last 200 response for the same URL, and a 304
-// answer decodes the body cached with it.
+// answer decodes the body cached with it. GitHub leaves the Link header off
+// a 304, so the returned headers carry the cached one instead.
 func (c *Client) send(ctx context.Context, method, u, auth string, body, out any) (http.Header, error) {
 	var r io.Reader
 	if body != nil {
@@ -285,9 +286,12 @@ func (c *Client) send(ctx context.Context, method, u, auth string, body, out any
 	case resp.StatusCode == http.StatusNotModified && cached != nil:
 		c.notModified.Add(1)
 		data = cached.body
+		if cached.link != "" {
+			resp.Header.Set("Link", cached.link)
+		}
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
 		if etag := resp.Header.Get("ETag"); method == http.MethodGet && etag != "" {
-			c.cache.put(u, etag, data)
+			c.cache.put(u, etag, resp.Header.Get("Link"), data)
 		}
 	default:
 		return resp.Header, newAPIError(req, resp, data)
@@ -333,11 +337,12 @@ func nextLink(link string) string {
 
 type etagEntry struct {
 	etag string
+	link string
 	body []byte
 	used int64
 }
 
-// etagCache holds the latest ETag and body for each GET URL, dropping the
+// etagCache holds the latest ETag, Link header and body for each GET URL, dropping the
 // least recently used URL once it holds maxCached.
 type etagCache struct {
 	mu      sync.Mutex
@@ -356,7 +361,7 @@ func (c *etagCache) get(u string) *etagEntry {
 	return e
 }
 
-func (c *etagCache) put(u, etag string, body []byte) {
+func (c *etagCache) put(u, etag, link string, body []byte) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.entries == nil {
@@ -372,7 +377,7 @@ func (c *etagCache) put(u, etag string, body []byte) {
 		delete(c.entries, oldest)
 	}
 	c.clock++
-	c.entries[u] = &etagEntry{etag: etag, body: body, used: c.clock}
+	c.entries[u] = &etagEntry{etag: etag, link: link, body: body, used: c.clock}
 }
 
 func (c *etagCache) len() int {
