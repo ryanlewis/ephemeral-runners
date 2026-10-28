@@ -72,9 +72,16 @@ type clock struct {
 }
 
 type devices struct {
-	Disks      []disk   `xml:"disk"`
-	Interfaces []nic    `xml:"interface"`
-	Serials    []serial `xml:"serial"`
+	Controllers []controller `xml:"controller"`
+	Disks       []disk       `xml:"disk"`
+	Interfaces  []nic        `xml:"interface"`
+	Serials     []serial     `xml:"serial"`
+}
+
+type controller struct {
+	Type  string `xml:"type,attr"`
+	Index int    `xml:"index,attr"`
+	Model string `xml:"model,attr"`
 }
 
 type disk struct {
@@ -135,6 +142,10 @@ type serialTarget struct {
 const (
 	jitSerial = "jitconfig"
 	jitTarget = "vdb"
+	// On q35 libvirt adds only the PCIe root ports the devices at boot
+	// need, and a hot-plugged disk needs a free one. Devices at boot fill
+	// the declared ports first, so declare more than they use.
+	rootPorts = 8
 )
 
 // files are the paths that make up one VM, all inside its directory.
@@ -221,6 +232,11 @@ func domainXML(s Spec, n nic) ([]byte, error) {
 				Source: serialSource{Path: f.serial},
 			}},
 		},
+	}
+	// Index 0 is the PCIe root, which libvirt adds itself.
+	for i := 1; i <= rootPorts; i++ {
+		d.Devices.Controllers = append(d.Devices.Controllers,
+			controller{Type: "pci", Index: i, Model: "pcie-root-port"})
 	}
 	if s.JITConfig != "" {
 		d.Devices.Disks = append(d.Devices.Disks, jitDisk(f.jitconfig))
