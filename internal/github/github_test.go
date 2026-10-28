@@ -373,6 +373,9 @@ func TestErrorMapping(t *testing.T) {
 			if !errors.As(err, &apiErr) || apiErr.StatusCode != tt.status || apiErr.Message != "nope" {
 				t.Fatalf("err = %#v", err)
 			}
+			if want := tt.headers["Retry-After"] == "60"; (apiErr.RetryAfter == time.Minute) != want {
+				t.Errorf("RetryAfter = %s", apiErr.RetryAfter)
+			}
 			for _, e := range all {
 				want := e == tt.want || (e == ErrForbidden && tt.status == 403)
 				if errors.Is(err, e) != want {

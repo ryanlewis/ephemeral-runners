@@ -171,6 +171,8 @@ type APIError struct {
 	// RateLimited is set for a 429, or a 403 with no requests remaining or
 	// with a Retry-After header, which GitHub sends for a secondary limit.
 	RateLimited bool
+	// RetryAfter is the wait a Retry-After header asks for, or zero.
+	RetryAfter time.Duration
 }
 
 func (e *APIError) Error() string {
@@ -210,6 +212,9 @@ func newAPIError(req *http.Request, resp *http.Response, body []byte) *APIError 
 	}
 	if len(e.Message) > 200 {
 		e.Message = e.Message[:200]
+	}
+	if secs, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && secs > 0 {
+		e.RetryAfter = time.Duration(secs) * time.Second
 	}
 	e.RateLimited = resp.StatusCode == http.StatusTooManyRequests ||
 		(resp.StatusCode == http.StatusForbidden &&
