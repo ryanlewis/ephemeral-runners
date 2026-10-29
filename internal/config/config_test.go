@@ -147,6 +147,8 @@ func TestValidateErrors(t *testing.T) {
 			"budget needs vcpus and memory_gib above zero\n" + `size "medium" needs vcpus and memory_gib above zero`},
 		{"no sizes", `"name_prefix"`, `"sizes": {}, "name_prefix"`,
 			"sizes is empty\n" + `default_size "medium" is not one of the sizes` + "\n" + `spares.size "medium" is not one of the sizes`},
+		{"size name not usable in a vm name", `"name_prefix"`, `"sizes": {"x+l": {"vcpus": 1, "memory_gib": 1}, "medium": {"vcpus": 4, "memory_gib": 4}}, "name_prefix"`,
+			`size "x+l" must be letters, digits, '.', '_' and '-'`},
 		{"blank size name", `"name_prefix"`, `"sizes": {" ": {"vcpus": 1, "memory_gib": 1}, "medium": {"vcpus": 4, "memory_gib": 4}}, "name_prefix"`, "sizes has an empty name"},
 		{"size zero vcpus", `"name_prefix"`, `"sizes": {"medium": {"vcpus": 0, "memory_gib": 4}}, "name_prefix"`, `size "medium" needs vcpus and memory_gib above zero`},
 		{"size zero memory", `"name_prefix"`, `"sizes": {"medium": {"vcpus": 4, "memory_gib": 0}}, "name_prefix"`, `size "medium" needs vcpus and memory_gib above zero`},

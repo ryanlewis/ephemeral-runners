@@ -161,6 +161,8 @@ func Parse(b []byte) (*Config, error) {
 var (
 	repoPart   = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 	namePrefix = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+	// sizePart mirrors the characters vm.checkName allows, as the size is part of the VM name.
+	sizePart = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 )
 
 // ValidRepo reports whether s has the form owner/name.
@@ -260,6 +262,8 @@ func (c *Config) checkSize(name string, sizeSeen map[string]string, bad badFunc)
 	s := c.Sizes[name]
 	if strings.TrimSpace(name) == "" {
 		bad("sizes has an empty name")
+	} else if !sizePart.MatchString(name) {
+		bad("size %q must be letters, digits, '.', '_' and '-'", name)
 	}
 	if other, ok := sizeSeen[strings.ToLower(name)]; ok {
 		bad("sizes %q and %q differ only in case", other, name)
