@@ -1,0 +1,9 @@
+[Unit]
+Description=Rebuild the ephemeral-runners VM image
+Documentation=https://github.com/ryanlewis/ephemeral-runners
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/ephemeral-runners/image/build.sh

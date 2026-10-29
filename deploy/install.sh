@@ -33,6 +33,14 @@ fi
 
 install -D -m 0755 "$binary" /usr/local/bin/ephemeral-runners
 install -D -m 0644 "$here/ephemeral-runners.service" /etc/systemd/system/ephemeral-runners.service
+install -D -m 0644 "$here/ephemeral-runners-image.service" /etc/systemd/system/ephemeral-runners-image.service
+install -D -m 0644 "$here/ephemeral-runners-image.timer" /etc/systemd/system/ephemeral-runners-image.timer
+# The image build, for the timer. Replaced whole, so files removed from the
+# checkout go too.
+rm -rf /usr/local/lib/ephemeral-runners/image
+install -d -m 0755 /usr/local/lib/ephemeral-runners
+cp -R "$root/image" /usr/local/lib/ephemeral-runners/image
+chmod -R u=rwX,go=rX /usr/local/lib/ephemeral-runners/image
 install -D -m 0644 "$here/sysusers.conf" /etc/sysusers.d/ephemeral-runners.conf
 install -D -m 0644 "$here/tmpfiles.conf" /etc/tmpfiles.d/ephemeral-runners.conf
 
@@ -41,3 +49,4 @@ systemd-tmpfiles --create /etc/tmpfiles.d/ephemeral-runners.conf
 systemctl daemon-reload
 
 echo "installed; write /etc/ephemeral-runners/config.json, then: systemctl enable --now ephemeral-runners"
+echo "to rebuild the image weekly: systemctl enable --now ephemeral-runners-image.timer"

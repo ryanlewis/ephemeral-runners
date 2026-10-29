@@ -32,6 +32,15 @@ It needs `libguestfs-tools` and `qemu-utils`. It:
 To pick up a new runner or rustup release, change the version and checksum in
 `image/versions.env` together.
 
+`deploy/install.sh` also installs a copy of `image/` in
+`/usr/local/lib/ephemeral-runners/image` and a timer that rebuilds the image
+there once a week, which picks up Debian's security updates. Turn it on with
+`systemctl enable --now ephemeral-runners-image.timer`. The service replaces
+its warm spares once a new image is current. Set `METRICS_FILE` in the config
+to record each build's outcome for Prometheus's node_exporter textfile
+collector: `ephemeral_runners_image_build_last_success_seconds` and
+`ephemeral_runners_image_build_last_exit_code`.
+
 ## Install
 
 The service runs under systemd as its own user, `ephemeral-runners`. That user
