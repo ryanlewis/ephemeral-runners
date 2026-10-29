@@ -31,6 +31,7 @@ type fakeGitHub struct {
 	runners    map[string][]github.Runner
 	nextID     int64
 	jobsErr    error
+	queuedErr  map[string]error // QueuedJobs error, by repo
 	jitErr     error
 	deleteErr  error
 	runnersErr map[string]error // ListRunners error, by repo
@@ -48,6 +49,9 @@ func (f *fakeGitHub) QueuedJobs(_ context.Context, repo string, statuses ...stri
 	f.statuses = append(f.statuses, statuses)
 	if f.jobsErr != nil {
 		return nil, f.jobsErr
+	}
+	if err := f.queuedErr[repo]; err != nil {
+		return nil, err
 	}
 	return slices.Clone(f.jobs[repo]), nil
 }
@@ -766,6 +770,64 @@ func TestShutdownCarriesOnPastErrors(t *testing.T) {
 	}
 	if r.vms.pruned != 1 || len(r.l.machines) != 0 {
 		t.Errorf("pruned %d, machines %v", r.vms.pruned, r.l.machines)
+	}
+}
+
+// A repo whose poll keeps failing doesn't stop the loop serving the
+// others, enforcing time limits or letting spares go.
+func TestOneRepoFailing(t *testing.T) {
+	const other = "example-org/other-repo"
+	r := newRig(t, 1, "")
+	logs := r.captureLogs()
+	r.l.cfg.Repos = []string{other, repo}
+	r.gh.queuedErr = map[string]error{other: &github.APIError{StatusCode: 404}}
+	j := r.queue(0, "self-hosted", "large")
+	if d := r.tick(); d != minBackoff {
+		t.Errorf("wait %s, want the backoff", d)
+	}
+	large := r.vms.specsOfSize(8)
+	if len(large) != 1 || len(r.vms.specsOfSize(4)) != 1 {
+		t.Fatalf("running %v, want a large VM for the job and a spare", r.vms.running)
+	}
+	if !strings.Contains(logs.String(), other+": queued jobs") {
+		t.Errorf("failing repo not logged:\n%s", logs)
+	}
+	r.gh.setRunner(large[0].Name, "online", true)
+	r.take(j)
+	r.tick()
+	r.clock.advance(r.cfg.Timeouts.Job.D() + time.Minute)
+	r.tick()
+	if len(r.vms.running) != 0 {
+		t.Errorf("still running %v, destroyed %v", r.vms.running, r.vms.destroyed)
+	}
+}
+
+// A rate limit stops the tick's GitHub calls, but not its time limits.
+func TestRateLimitedPollStillEnforcesLimits(t *testing.T) {
+	const other = "example-org/other-repo"
+	r := newRig(t, 0, "")
+	r.l.cfg.Repos = []string{other, repo}
+	j := r.queue(0, "self-hosted", "large")
+	r.tick()
+	name := r.vms.created[0].Name
+	r.gh.setRunner(name, "online", true)
+	r.take(j)
+	r.tick()
+	r.queue(0, "self-hosted", "small")
+	r.gh.queuedErr = map[string]error{other: &github.APIError{StatusCode: 403, RateLimited: true}}
+	r.gh.statuses = nil
+	r.clock.advance(r.cfg.Timeouts.Job.D() + time.Minute)
+	if d := r.tick(); d != rateLimitWait {
+		t.Errorf("wait %s, want %s", d, rateLimitWait)
+	}
+	if len(r.gh.statuses) != 1 {
+		t.Errorf("polled %d repos after the rate limit, want 1", len(r.gh.statuses))
+	}
+	if len(r.vms.created) != 1 {
+		t.Errorf("launched %v while rate limited", r.vms.created[1:])
+	}
+	if !slices.Equal(r.vms.destroyed, []string{name}) {
+		t.Errorf("destroyed %q, want %q", r.vms.destroyed, name)
 	}
 }
 
