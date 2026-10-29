@@ -237,6 +237,7 @@ func (l *Loop) Startup(ctx context.Context) error {
 			}
 			if err := l.gh.DeleteRunner(ctx, repo, r.ID); err != nil && !errors.Is(err, github.ErrNotFound) {
 				l.log.Warn("delete leftover runner", "repo", repo, "runner", r.Name, "err", err)
+				l.pendingDeletes = append(l.pendingDeletes, runnerRef{repo, r.ID})
 				continue
 			}
 			l.log.Info("deleted leftover runner", "repo", repo, "runner", r.Name, "status", r.Status)
