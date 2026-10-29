@@ -898,6 +898,35 @@ func TestRetryAfterBehindOtherRepoError(t *testing.T) {
 	}
 }
 
+// A leftover runner that Startup fails to delete is retried on later
+// ticks; one already gone is not.
+func TestStartupDeleteRetried(t *testing.T) {
+	r := newRig(t, 0, "")
+	r.gh.runners[repo] = []github.Runner{{ID: 1, Name: "ex-example-repo-small-0001", Status: "offline"}}
+	r.gh.deleteErr = errors.New("connection reset")
+	if err := r.l.Startup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if want := []runnerRef{{repo, 1}}; !slices.Equal(r.l.pendingDeletes, want) {
+		t.Fatalf("pending %v, want %v", r.l.pendingDeletes, want)
+	}
+	r.gh.deleteErr = nil
+	r.tick()
+	if !slices.Equal(r.gh.deleted, []int64{1}) || len(r.gh.runners[repo]) != 0 || len(r.l.pendingDeletes) != 0 {
+		t.Errorf("deleted %v, runners %v, pending %v", r.gh.deleted, r.gh.runners[repo], r.l.pendingDeletes)
+	}
+
+	r = newRig(t, 0, "")
+	r.gh.runners[repo] = []github.Runner{{ID: 1, Name: "ex-example-repo-small-0001", Status: "offline"}}
+	r.gh.deleteErr = &github.APIError{StatusCode: 404}
+	if err := r.l.Startup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.l.pendingDeletes) != 0 {
+		t.Errorf("queued a runner already gone: %v", r.l.pendingDeletes)
+	}
+}
+
 func TestRunStopsOnCancel(t *testing.T) {
 	r := newRig(t, 0, "")
 	ctx, cancel := context.WithCancel(context.Background())
