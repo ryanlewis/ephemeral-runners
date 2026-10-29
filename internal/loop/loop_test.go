@@ -643,7 +643,7 @@ func TestStartupLogsRemovedFiles(t *testing.T) {
 }
 
 // GitHub errors don't stop Startup: a repo it can't list is skipped, and a
-// runner it can't delete is left for later. A runner already gone counts
+// runner it can't delete is left registered. A runner already gone counts
 // as deleted.
 func TestStartupCarriesOnPastGitHubErrors(t *testing.T) {
 	const other = "example-org/other-repo"
@@ -699,6 +699,9 @@ func TestShutdownWithoutVMList(t *testing.T) {
 		names = append(names, n)
 		ids = append(ids, m.runnerID)
 	}
+	if len(names) != 2 {
+		t.Fatalf("tick launched %q, want two VMs", names)
+	}
 	slices.Sort(names)
 	r.vms.listErr = errors.New("libvirt down")
 	r.l.Shutdown()
@@ -736,6 +739,9 @@ func TestShutdownCarriesOnPastErrors(t *testing.T) {
 		} else {
 			gone = m
 		}
+	}
+	if stuck == nil || gone == nil {
+		t.Fatalf("tick launched %v, want one large and one small VM", r.l.machines)
 	}
 	r.vms.stuck = map[string]bool{stuck.name: true}
 	r.gh.runners[repo] = append(r.gh.runners[repo], github.Runner{ID: 50, Name: "ex-old"})
