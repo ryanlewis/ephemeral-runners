@@ -91,7 +91,8 @@ func checkJIT(jit string) error {
 
 // Create sets up the VM's files and starts it. If JITConfig is set, the VM
 // boots with its job config attached; otherwise it waits for Attach. On
-// failure Create removes what it made.
+// failure Create removes what it made, unless it could not destroy a domain
+// that may have started: then the files stay for Prune.
 func (l *Launcher) Create(ctx context.Context, s Spec) (err error) {
 	if err := checkName(s.Name); err != nil {
 		return err
@@ -135,8 +136,9 @@ func (l *Launcher) Create(ctx context.Context, s Spec) (err error) {
 	if err := os.Mkdir(f.dir, 0o755); err != nil {
 		return fmt.Errorf("vm %s: %w", s.Name, err)
 	}
+	keep := false // the domain may be running, so its files must stay
 	defer func() {
-		if err != nil {
+		if err != nil && !keep {
 			_ = os.RemoveAll(f.dir)
 		}
 	}()
@@ -156,8 +158,12 @@ func (l *Launcher) Create(ctx context.Context, s Spec) (err error) {
 	if out, err := l.virsh(ctx, "create", f.xml); err != nil {
 		// The domain may have started before virsh failed, such as when
 		// ctx ended. Make sure it is gone before its files are.
-		_ = l.Destroy(context.WithoutCancel(ctx), s.Name)
-		return cmdError("vm "+s.Name+": virsh create", out, err)
+		cerr := cmdError("vm "+s.Name+": virsh create", out, err)
+		if derr := l.Destroy(context.WithoutCancel(ctx), s.Name); derr != nil {
+			keep = true
+			return errors.Join(cerr, derr)
+		}
+		return cerr
 	}
 	return nil
 }
