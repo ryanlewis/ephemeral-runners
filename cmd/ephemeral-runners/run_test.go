@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,12 +14,12 @@ import (
 func TestRunServiceErrors(t *testing.T) {
 	dir := t.TempDir()
 	noKey := filepath.Join(dir, "config.json")
-	cfg := `{
-  "github": {"app_id": 42, "installation_id": 7, "private_key_file": "` + filepath.Join(dir, "none.pem") + `"},
+	cfg := fmt.Sprintf(`{
+  "github": {"app_id": 42, "installation_id": 7, "private_key_file": %q},
   "repos": ["example-org/example-repo"],
   "labels": ["self-hosted"],
   "name_prefix": "example"
-}`
+}`, filepath.Join(dir, "none.pem"))
 	if err := os.WriteFile(noKey, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}
