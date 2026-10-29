@@ -358,6 +358,9 @@ func TestNextLinkToOtherHostRefused(t *testing.T) {
 // secondaryMessage is the message GitHub sends with a secondary rate limit.
 const secondaryMessage = "You have exceeded a secondary rate limit. Please wait a few minutes before you try again."
 
+// abuseMessage is how GitHub Enterprise Server and older API versions word it.
+const abuseMessage = "You have triggered an abuse detection mechanism. Please wait a few minutes before you try again."
+
 func TestErrorMapping(t *testing.T) {
 	tests := []struct {
 		status  int
@@ -379,6 +382,8 @@ func TestErrorMapping(t *testing.T) {
 		// an empty primary limit; only the message says what it is.
 		{403, map[string]string{"X-RateLimit-Remaining": "4000"}, secondaryMessage, ErrRateLimited},
 		{429, map[string]string{"X-RateLimit-Remaining": "4000"}, secondaryMessage, ErrRateLimited},
+		// GitHub Enterprise Server and older API versions word it differently.
+		{403, map[string]string{"X-RateLimit-Remaining": "4000"}, abuseMessage, ErrRateLimited},
 		// A permission error with requests remaining stays plain forbidden.
 		{403, map[string]string{"X-RateLimit-Remaining": "4000"}, "Resource not accessible by integration", ErrForbidden},
 	}
