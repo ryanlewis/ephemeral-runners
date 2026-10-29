@@ -355,38 +355,51 @@ func TestNextLinkToOtherHostRefused(t *testing.T) {
 	}
 }
 
+// secondaryMessage is the message GitHub sends with a secondary rate limit.
+const secondaryMessage = "You have exceeded a secondary rate limit. Please wait a few minutes before you try again."
+
 func TestErrorMapping(t *testing.T) {
 	tests := []struct {
 		status  int
 		headers map[string]string
+		message string
 		want    error
 	}{
-		{401, nil, ErrUnauthorized},
-		{403, nil, ErrForbidden},
-		{404, nil, ErrNotFound},
-		{422, nil, ErrUnprocessable},
-		{500, nil, ErrServer},
-		{502, nil, ErrServer},
-		{429, nil, ErrRateLimited},
-		{403, map[string]string{"X-RateLimit-Remaining": "0"}, ErrRateLimited},
+		{401, nil, "", ErrUnauthorized},
+		{403, nil, "", ErrForbidden},
+		{404, nil, "", ErrNotFound},
+		{422, nil, "", ErrUnprocessable},
+		{500, nil, "", ErrServer},
+		{502, nil, "", ErrServer},
+		{429, nil, "", ErrRateLimited},
+		{403, map[string]string{"X-RateLimit-Remaining": "0"}, "", ErrRateLimited},
 		// A secondary rate limit leaves requests remaining and sets Retry-After.
-		{403, map[string]string{"X-RateLimit-Remaining": "4000", "Retry-After": "60"}, ErrRateLimited},
+		{403, map[string]string{"X-RateLimit-Remaining": "4000", "Retry-After": "60"}, "", ErrRateLimited},
+		// GitHub can send a secondary rate limit with neither Retry-After nor
+		// an empty primary limit; only the message says what it is.
+		{403, map[string]string{"X-RateLimit-Remaining": "4000"}, secondaryMessage, ErrRateLimited},
+		{429, map[string]string{"X-RateLimit-Remaining": "4000"}, secondaryMessage, ErrRateLimited},
+		// A permission error with requests remaining stays plain forbidden.
+		{403, map[string]string{"X-RateLimit-Remaining": "4000"}, "Resource not accessible by integration", ErrForbidden},
 	}
 	all := []error{ErrUnauthorized, ErrForbidden, ErrNotFound, ErrUnprocessable, ErrRateLimited, ErrServer}
 	for _, tt := range tests {
-		t.Run(fmt.Sprint(tt.status, tt.headers), func(t *testing.T) {
+		if tt.message == "" {
+			tt.message = "nope"
+		}
+		t.Run(fmt.Sprint(tt.status, tt.headers, tt.message), func(t *testing.T) {
 			f, srv := newFake(t, time.Now())
 			f.HandleFunc("DELETE /repos/example-org/example-repo/actions/runners/9", func(w http.ResponseWriter, r *http.Request) {
 				for k, v := range tt.headers {
 					w.Header().Set(k, v)
 				}
 				w.WriteHeader(tt.status)
-				writeBody(t, w, `{"message":"nope"}`)
+				writeBody(t, w, fmt.Sprintf(`{"message":%q}`, tt.message))
 			})
 			c := newClient(t, srv, nil)
 			err := c.DeleteRunner(context.Background(), "example-org/example-repo", 9)
 			var apiErr *APIError
-			if !errors.As(err, &apiErr) || apiErr.StatusCode != tt.status || apiErr.Message != "nope" {
+			if !errors.As(err, &apiErr) || apiErr.StatusCode != tt.status || apiErr.Message != tt.message {
 				t.Fatalf("err = %#v", err)
 			}
 			if want := tt.headers["Retry-After"] == "60"; (apiErr.RetryAfter == time.Minute) != want {
