@@ -21,11 +21,16 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // JITConfigSize is the size of the raw disk that carries a job config. The
 // config is padded with zero bytes, which the VM strips.
 const JITConfigSize = 64 << 10
+
+// cleanupTimeout bounds the destroy after a failed create, which runs even
+// when the caller's context has ended.
+var cleanupTimeout = 30 * time.Second
 
 // Spec describes a VM to create.
 type Spec struct {
@@ -159,7 +164,14 @@ func (l *Launcher) Create(ctx context.Context, s Spec) (err error) {
 		// The domain may have started before virsh failed, such as when
 		// ctx ended. Make sure it is gone before its files are.
 		cerr := cmdError("vm "+s.Name+": virsh create", out, err)
-		if derr := l.Destroy(context.WithoutCancel(ctx), s.Name); derr != nil {
+		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+		derr := l.Destroy(dctx, s.Name)
+		if derr != nil && dctx.Err() != nil {
+			// Exec reports a killed command, not why it was killed.
+			derr = fmt.Errorf("%w: %w", derr, dctx.Err())
+		}
+		cancel()
+		if derr != nil {
 			keep = true
 			return errors.Join(cerr, derr)
 		}

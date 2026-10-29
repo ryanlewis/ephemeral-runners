@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakeRunner records commands and answers them from a script keyed by the
@@ -595,6 +596,40 @@ func TestCreateFailureKeepsFilesWhenDestroyFails(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(s.StateDir, s.Name, "domain.xml")); err != nil {
 		t.Errorf("vm files removed: %v", err)
 	}
+}
+
+// A hung libvirtd must not hang Create in its cleanup after a failed create.
+func TestCreateFailureDestroyTimesOut(t *testing.T) {
+	old := cleanupTimeout
+	cleanupTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { cleanupTimeout = old })
+
+	s := testSpec(t)
+	l := &Launcher{Runner: &hangingDestroy{fakeRunner{
+		err: map[string]error{"virsh create": errors.New("exit status 1")},
+	}}}
+	done := make(chan error, 1)
+	go func() { done <- l.Create(context.Background(), s) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("error %v, want the destroy's deadline exceeded", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Create did not return")
+	}
+}
+
+// hangingDestroy is a fakeRunner whose virsh destroy blocks until ctx ends,
+// then fails as Exec does when it kills the command.
+type hangingDestroy struct{ fakeRunner }
+
+func (h *hangingDestroy) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	if name == "virsh" && slices.Contains(args, "destroy") {
+		<-ctx.Done()
+		return nil, errors.New("signal: killed")
+	}
+	return h.fakeRunner.Run(ctx, name, args...)
 }
 
 func TestPruneSkipsVMsBeingCreatedUnderAnotherPath(t *testing.T) {
