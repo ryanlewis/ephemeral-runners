@@ -175,6 +175,19 @@ func (c *Config) Validate() error {
 	var errs []error
 	bad := func(format string, a ...any) { errs = append(errs, fmt.Errorf(format, a...)) }
 
+	c.checkGitHub(bad)
+	c.checkRepos(bad)
+	c.checkLabels(bad)
+	c.checkSizes(bad)
+	c.checkSpares(bad)
+	c.checkVM(bad)
+	return errors.Join(errs...)
+}
+
+// badFunc records one problem found by a check.
+type badFunc func(format string, a ...any)
+
+func (c *Config) checkGitHub(bad badFunc) {
 	if c.GitHub.AppID <= 0 {
 		bad("github.app_id is missing")
 	}
@@ -187,7 +200,9 @@ func (c *Config) Validate() error {
 	if u, err := url.Parse(c.GitHub.APIURL); err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
 		bad("github.api_url %q is not an http(s) URL", c.GitHub.APIURL)
 	}
+}
 
+func (c *Config) checkRepos(bad badFunc) {
 	if len(c.Repos) == 0 {
 		bad("repos is empty")
 	}
@@ -201,7 +216,11 @@ func (c *Config) Validate() error {
 		}
 		seen[strings.ToLower(r)] = true
 	}
+}
 
+// checkLabels also checks name_prefix and poll_interval, which come next in
+// the file and so next in the error list.
+func (c *Config) checkLabels(bad badFunc) {
 	if len(c.Labels) == 0 {
 		bad("labels is empty")
 	}
@@ -216,7 +235,10 @@ func (c *Config) Validate() error {
 	if c.PollInterval <= 0 {
 		bad("poll_interval must be more than zero")
 	}
+}
 
+// checkSizes checks the budget, every size and default_size.
+func (c *Config) checkSizes(bad badFunc) {
 	if c.Budget.VCPUs <= 0 || c.Budget.MemoryGiB <= 0 {
 		bad("budget needs vcpus and memory_gib above zero")
 	}
@@ -225,29 +247,37 @@ func (c *Config) Validate() error {
 	}
 	sizeSeen := map[string]string{}
 	for _, name := range c.SizeNames() {
-		s := c.Sizes[name]
-		if strings.TrimSpace(name) == "" {
-			bad("sizes has an empty name")
-		}
-		if other, ok := sizeSeen[strings.ToLower(name)]; ok {
-			bad("sizes %q and %q differ only in case", other, name)
-		}
-		sizeSeen[strings.ToLower(name)] = name
-		if s.VCPUs <= 0 || s.MemoryGiB <= 0 {
-			bad("size %q needs vcpus and memory_gib above zero", name)
-		}
-		if s.VCPUs > c.Budget.VCPUs || s.MemoryGiB > c.Budget.MemoryGiB {
-			bad("size %q (%d vCPU, %d GiB) is larger than the budget (%d vCPU, %d GiB)",
-				name, s.VCPUs, s.MemoryGiB, c.Budget.VCPUs, c.Budget.MemoryGiB)
-		}
-		if slices.ContainsFunc(c.Labels, func(l string) bool { return strings.EqualFold(l, name) }) {
-			bad("size %q is also in labels", name)
-		}
+		c.checkSize(name, sizeSeen, bad)
 	}
 	if _, ok := c.Sizes[c.DefaultSize]; !ok {
 		bad("default_size %q is not one of the sizes", c.DefaultSize)
 	}
+}
 
+// checkSize checks one size. sizeSeen maps each lower-cased name already
+// checked to its original spelling.
+func (c *Config) checkSize(name string, sizeSeen map[string]string, bad badFunc) {
+	s := c.Sizes[name]
+	if strings.TrimSpace(name) == "" {
+		bad("sizes has an empty name")
+	}
+	if other, ok := sizeSeen[strings.ToLower(name)]; ok {
+		bad("sizes %q and %q differ only in case", other, name)
+	}
+	sizeSeen[strings.ToLower(name)] = name
+	if s.VCPUs <= 0 || s.MemoryGiB <= 0 {
+		bad("size %q needs vcpus and memory_gib above zero", name)
+	}
+	if s.VCPUs > c.Budget.VCPUs || s.MemoryGiB > c.Budget.MemoryGiB {
+		bad("size %q (%d vCPU, %d GiB) is larger than the budget (%d vCPU, %d GiB)",
+			name, s.VCPUs, s.MemoryGiB, c.Budget.VCPUs, c.Budget.MemoryGiB)
+	}
+	if slices.ContainsFunc(c.Labels, func(l string) bool { return strings.EqualFold(l, name) }) {
+		bad("size %q is also in labels", name)
+	}
+}
+
+func (c *Config) checkSpares(bad badFunc) {
 	if c.Spares.Count < 0 {
 		bad("spares.count must not be negative")
 	}
@@ -259,7 +289,10 @@ func (c *Config) Validate() error {
 			bad("spares.idle_after must be more than zero")
 		}
 	}
+}
 
+// checkVM checks the vm paths and the timeouts.
+func (c *Config) checkVM(bad badFunc) {
 	if c.VM.Image == "" {
 		bad("vm.image is missing")
 	}
@@ -272,11 +305,9 @@ func (c *Config) Validate() error {
 	if c.VM.LibvirtURI == "" {
 		bad("vm.libvirt_uri is missing")
 	}
-
 	if c.Timeouts.Online <= 0 || c.Timeouts.Idle <= 0 || c.Timeouts.Job <= 0 {
 		bad("timeouts online, idle and job must all be more than zero")
 	}
-	return errors.Join(errs...)
 }
 
 // SizeNames returns the size names in order.
