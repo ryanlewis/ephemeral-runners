@@ -115,6 +115,9 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			f.t.Errorf("generate-jitconfig body: %v", err)
 		}
+		if got := strings.Join(in.Labels, " "); got != "self-hosted example" {
+			f.t.Errorf("generate-jitconfig labels [%s], want the configured labels", got)
+		}
 		f.minted, f.exists = in.Name, true
 		body = map[string]any{"runner": map[string]any{"id": testRunnerID, "name": in.Name}, "encoded_jit_config": testJIT}
 	case "GET " + rp + "/runners/99":
