@@ -137,7 +137,7 @@ func (l *Launcher) Create(ctx context.Context, s Spec) (err error) {
 	}
 	defer func() {
 		if err != nil {
-			os.RemoveAll(f.dir)
+			_ = os.RemoveAll(f.dir)
 		}
 	}()
 
@@ -156,7 +156,7 @@ func (l *Launcher) Create(ctx context.Context, s Spec) (err error) {
 	if out, err := l.virsh(ctx, "create", f.xml); err != nil {
 		// The domain may have started before virsh failed, such as when
 		// ctx ended. Make sure it is gone before its files are.
-		l.Destroy(context.WithoutCancel(ctx), s.Name)
+		_ = l.Destroy(context.WithoutCancel(ctx), s.Name)
 		return cmdError("vm "+s.Name+": virsh create", out, err)
 	}
 	return nil
@@ -186,7 +186,7 @@ func (l *Launcher) Attach(ctx context.Context, stateDir, name, jitConfig string)
 		"--live", "--targetbus", "virtio", "--driver", "qemu", "--subdriver", "raw",
 		"--mode", "readonly", "--serial", jitSerial)
 	if err != nil {
-		os.Remove(f.jitconfig)
+		_ = os.Remove(f.jitconfig)
 		return cmdError("vm "+name+": virsh attach-disk", out, err)
 	}
 	return nil
@@ -310,12 +310,12 @@ func writeJIT(path, jit string) error {
 		return err
 	}
 	if _, err := f.Write(buf); err != nil {
-		f.Close()
-		os.Remove(path)
+		_ = f.Close()
+		_ = os.Remove(path)
 		return err
 	}
 	if err := f.Close(); err != nil {
-		os.Remove(path)
+		_ = os.Remove(path)
 		return err
 	}
 	return nil
