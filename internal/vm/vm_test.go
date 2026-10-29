@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakeRunner records commands and answers them from a script keyed by the
@@ -572,6 +573,34 @@ func TestCreateFailureDestroysDomain(t *testing.T) {
 	}
 }
 
+// A hung libvirtd must not hang the loop: each command has a deadline.
+func TestCreateHungVirshTimesOut(t *testing.T) {
+	s := testSpec(t)
+	l := &Launcher{Runner: &hangingVirsh{}, timeout: 50 * time.Millisecond}
+	done := make(chan error, 1)
+	go func() { done <- l.Create(context.Background(), s) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "virsh create") {
+			t.Errorf("error %v, want virsh create's deadline exceeded", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Create did not return")
+	}
+}
+
+// hangingVirsh is a fakeRunner whose virsh commands block until ctx ends,
+// then fail as Exec does when it kills the command.
+type hangingVirsh struct{ fakeRunner }
+
+func (h *hangingVirsh) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	if name == "virsh" {
+		<-ctx.Done()
+		return nil, errors.New("signal: killed")
+	}
+	return h.fakeRunner.Run(ctx, name, args...)
+}
+
 func TestPruneSkipsVMsBeingCreatedUnderAnotherPath(t *testing.T) {
 	real := t.TempDir()
 	link := filepath.Join(t.TempDir(), "state")
@@ -606,5 +635,20 @@ func TestExecRunsInCLocale(t *testing.T) {
 	}
 	if got := strings.TrimSpace(string(out)); got != "C" {
 		t.Errorf("LC_ALL=%q, want C", got)
+	}
+}
+
+// A killed command's child, such as ssh under a qemu+ssh URI, can hold the
+// output pipe open. Exec must still return soon after ctx ends.
+func TestExecReturnsWhenChildHoldsOutput(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := Exec{}.Run(ctx, "sh", "-c", "sleep 30 & wait")
+	if err == nil {
+		t.Fatal("no error")
+	}
+	if d := time.Since(start); d > 10*time.Second {
+		t.Errorf("Run took %v after its context ended", d)
 	}
 }

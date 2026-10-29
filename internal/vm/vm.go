@@ -21,11 +21,17 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // JITConfigSize is the size of the raw disk that carries a job config. The
 // config is padded with zero bytes, which the VM strips.
 const JITConfigSize = 64 << 10
+
+// commandTimeout is how long a command such as virsh create may take before
+// it is killed. It is long enough for QEMU to start on a busy host, and short
+// enough that a hung libvirtd doesn't stall the caller for good.
+const commandTimeout = 2 * time.Minute
 
 // Spec describes a VM to create.
 type Spec struct {
@@ -57,6 +63,9 @@ type Exec struct{}
 func (Exec) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = append(os.Environ(), "LC_ALL=C")
+	// Don't wait for a child of a killed command, such as ssh for a
+	// qemu+ssh URI, to close the output.
+	cmd.WaitDelay = time.Second
 	return cmd.CombinedOutput()
 }
 
@@ -65,6 +74,9 @@ func (Exec) Run(ctx context.Context, name string, args ...string) ([]byte, error
 type Launcher struct {
 	URI    string // libvirt connection, such as qemu:///system
 	Runner Runner // nil means Exec
+
+	// timeout bounds each command; zero means commandTimeout.
+	timeout time.Duration
 
 	mu       sync.Mutex
 	creating map[string]int // VMs being set up, by name
@@ -333,7 +345,18 @@ func (l *Launcher) run(ctx context.Context, name string, args ...string) ([]byte
 	if r == nil {
 		r = Exec{}
 	}
-	return r.Run(ctx, name, args...)
+	d := l.timeout
+	if d == 0 {
+		d = commandTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, d)
+	defer cancel()
+	out, err := r.Run(ctx, name, args...)
+	if err != nil && ctx.Err() != nil {
+		// Exec reports a killed command, not why it was killed.
+		err = fmt.Errorf("%w: %w", err, ctx.Err())
+	}
+	return out, err
 }
 
 func cmdError(what string, out []byte, err error) error {
