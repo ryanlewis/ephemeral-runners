@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -53,6 +54,8 @@ type fakeGitHub struct {
 	keepOnDelete bool
 	// unlisted leaves runner 99 out of the runner list.
 	unlisted bool
+	// hook, if set, sees each request before it is answered.
+	hook func(r *http.Request)
 
 	mu      sync.Mutex
 	calls   []string
@@ -66,6 +69,9 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer f.mu.Unlock()
 	call := r.Method + " " + r.URL.RequestURI()
 	f.calls = append(f.calls, call)
+	if f.hook != nil {
+		f.hook(r)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-RateLimit-Limit", "5000")
 	w.Header().Set("X-RateLimit-Remaining", "4990")
@@ -151,9 +157,13 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// This runs off the test goroutine, so a failure is reported with
+	// t.Errorf rather than t.Fatal.
 	b, err := json.Marshal(body)
 	if err != nil {
-		f.t.Fatal(err)
+		f.t.Errorf("encode %s: %v", call, err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 	if r.Method == http.MethodGet {
 		sum := sha256.Sum256(b)
@@ -471,5 +481,33 @@ func TestMintErrors(t *testing.T) {
 			assertNoSecrets(t, out.String())
 			assertCalls(t, tc.f.Calls(), append([][]string{pollCalls}, tc.calls...)...)
 		})
+	}
+}
+
+// TestMintCancelled cancels the context once the runner exists, as Ctrl-C
+// would, and checks that the runner is still deleted.
+func TestMintCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	const runner = "/repos/example-org/example-repo/actions/runners/99"
+	f := &fakeGitHub{hook: func(r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == runner {
+			cancel()
+		}
+	}}
+	cfgFile := setup(t, f)
+	var out strings.Builder
+	err := runCheck(ctx, []string{"-config", cfgFile, "-mint", "example-org/example-repo"}, &out)
+	if !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "delete runner") {
+		t.Errorf("err = %v, want only the cancelled call", err)
+	}
+	calls := f.Calls()
+	if last := calls[len(calls)-1]; last != "DELETE "+runner {
+		t.Errorf("last call %q, want the cleanup delete", last)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.exists {
+		t.Error("runner 99 still exists")
 	}
 }
