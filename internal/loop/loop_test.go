@@ -1,6 +1,7 @@
 package loop
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -32,6 +33,7 @@ type fakeGitHub struct {
 	jobsErr    error
 	jitErr     error
 	deleteErr  error
+	runnersErr map[string]error // ListRunners error, by repo
 	rate       github.RateLimit
 	statuses   [][]string // run statuses asked for, per QueuedJobs call
 	deleted    []int64
@@ -61,6 +63,9 @@ func (f *fakeGitHub) GenerateJITConfig(_ context.Context, repo, name string, lab
 }
 
 func (f *fakeGitHub) ListRunners(_ context.Context, repo string) ([]github.Runner, error) {
+	if err := f.runnersErr[repo]; err != nil {
+		return nil, err
+	}
 	return slices.Clone(f.runners[repo]), nil
 }
 
@@ -99,8 +104,12 @@ type fakeVMs struct {
 	destroyed  []string
 	removed    []string
 	pruned     int
+	leftover   []string // files Prune finds to remove
 	createErr  error
 	destroyErr error
+	stuck      map[string]bool // VMs Destroy fails on
+	listErr    error
+	pruneErr   error
 }
 
 func newFakeVMs() *fakeVMs {
@@ -128,6 +137,9 @@ func (f *fakeVMs) Attach(_ context.Context, _, name, jit string) error {
 }
 
 func (f *fakeVMs) List(_ context.Context, prefix string) ([]string, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
 	var out []string
 	for n := range f.running {
 		if strings.HasPrefix(n, prefix) {
@@ -142,6 +154,9 @@ func (f *fakeVMs) Destroy(_ context.Context, name string) error {
 	if f.destroyErr != nil {
 		return f.destroyErr
 	}
+	if f.stuck[name] {
+		return fmt.Errorf("%s will not die", name)
+	}
 	delete(f.running, name)
 	f.destroyed = append(f.destroyed, name)
 	return nil
@@ -154,7 +169,10 @@ func (f *fakeVMs) Remove(_, name string) error {
 
 func (f *fakeVMs) Prune(context.Context, string, string) ([]string, error) {
 	f.pruned++
-	return nil, nil
+	if f.pruneErr != nil {
+		return nil, f.pruneErr
+	}
+	return f.leftover, nil
 }
 
 // powerOff is a VM shutting itself down after its job.
@@ -230,6 +248,13 @@ func (r *rig) take(j github.Job) {
 }
 
 func (r *rig) tick() time.Duration { return r.l.Tick(context.Background()) }
+
+// captureLogs sends the loop's log to the returned buffer.
+func (r *rig) captureLogs() *bytes.Buffer {
+	var b bytes.Buffer
+	r.l.log = slog.New(slog.NewTextHandler(&b, nil))
+	return &b
+}
 
 func TestDemandAndLabels(t *testing.T) {
 	r := newRig(t, 0, "")
@@ -549,6 +574,189 @@ func TestShutdown(t *testing.T) {
 	}
 	if !slices.Equal(r.gh.deleted, []int64{id}) {
 		t.Errorf("deleted %v, want %d", r.gh.deleted, id)
+	}
+	if r.vms.pruned != 1 || len(r.l.machines) != 0 {
+		t.Errorf("pruned %d, machines %v", r.vms.pruned, r.l.machines)
+	}
+}
+
+// Startup stops at the first VM error, before it touches any runner.
+func TestStartupStopsOnVMError(t *testing.T) {
+	boom := errors.New("boom")
+	for _, tc := range []struct {
+		name      string
+		fail      func(*fakeVMs)
+		want      string
+		destroyed []string
+		pruned    int
+	}{
+		{"list", func(f *fakeVMs) { f.listErr = boom }, "list VMs: boom", nil, 0},
+		{"destroy", func(f *fakeVMs) { f.stuck = map[string]bool{"ex-spare-0002": true} },
+			"destroy leftover VM ex-spare-0002: ex-spare-0002 will not die", []string{"ex-spare-0001"}, 0},
+		{"prune", func(f *fakeVMs) { f.pruneErr = boom }, "remove leftover VM files: boom",
+			[]string{"ex-spare-0001", "ex-spare-0002", "ex-spare-0003"}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(t, 0, "")
+			for _, n := range []string{"ex-spare-0001", "ex-spare-0002", "ex-spare-0003"} {
+				r.vms.running[n] = vm.Spec{}
+			}
+			r.gh.runners[repo] = []github.Runner{{ID: 1, Name: "ex-spare-0001", Status: "offline"}}
+			tc.fail(r.vms)
+			err := r.l.Startup(context.Background())
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("err %v, want %q", err, tc.want)
+			}
+			if tc.name != "destroy" && !errors.Is(err, boom) {
+				t.Errorf("%v does not wrap the cause", err)
+			}
+			if !slices.Equal(r.vms.destroyed, tc.destroyed) {
+				t.Errorf("destroyed %q, want %q", r.vms.destroyed, tc.destroyed)
+			}
+			if r.vms.pruned != tc.pruned {
+				t.Errorf("pruned %d times, want %d", r.vms.pruned, tc.pruned)
+			}
+			if len(r.gh.deleted) != 0 {
+				t.Errorf("deleted runners %v", r.gh.deleted)
+			}
+		})
+	}
+}
+
+// Startup logs the leftover files it removed, and says nothing when there
+// were none.
+func TestStartupLogsRemovedFiles(t *testing.T) {
+	for _, tc := range []struct {
+		leftover []string
+		want     int
+	}{{nil, 0}, {[]string{"ex-spare-0001"}, 1}} {
+		r := newRig(t, 0, "")
+		logs := r.captureLogs()
+		r.vms.leftover = tc.leftover
+		if err := r.l.Startup(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Count(logs.String(), "removed leftover VM files"); got != tc.want {
+			t.Errorf("leftover %q: logged %d times, want %d:\n%s", tc.leftover, got, tc.want, logs)
+		}
+	}
+}
+
+// GitHub errors don't stop Startup: a repo it can't list is skipped, and a
+// runner it can't delete is left for later. A runner already gone counts
+// as deleted.
+func TestStartupCarriesOnPastGitHubErrors(t *testing.T) {
+	const other = "example-org/other-repo"
+	runners := []github.Runner{
+		{ID: 1, Name: "ex-example-repo-small-0001", Status: "offline"},
+		{ID: 2, Name: "ex-example-repo-small-0002", Status: "online"},
+	}
+	for _, tc := range []struct {
+		name               string
+		err                error
+		deleted, notDelete int
+	}{
+		{"failed", errors.New("connection reset"), 0, 2},
+		{"gone", &github.APIError{StatusCode: 404}, 2, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(t, 0, "")
+			logs := r.captureLogs()
+			// The repo that fails comes first, so Startup must go past it.
+			r.l.cfg.Repos = []string{other, repo}
+			r.gh.runnersErr = map[string]error{other: errors.New("bad gateway")}
+			r.gh.runners[repo] = slices.Clone(runners)
+			r.gh.deleteErr = tc.err
+			if err := r.l.Startup(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			out := logs.String()
+			if !strings.Contains(out, `msg="list runners for clean-up" repo=`+other+` err="bad gateway"`) {
+				t.Errorf("no warning for %s:\n%s", other, out)
+			}
+			if got := strings.Count(out, `msg="deleted leftover runner"`); got != tc.deleted {
+				t.Errorf("logged %d deletes, want %d:\n%s", got, tc.deleted, out)
+			}
+			if got := strings.Count(out, `msg="delete leftover runner"`); got != tc.notDelete {
+				t.Errorf("logged %d failed deletes, want %d:\n%s", got, tc.notDelete, out)
+			}
+		})
+	}
+}
+
+// Shutdown destroys the VMs it tracks even when it can't list VMs, in name
+// order, and deletes their runners.
+func TestShutdownWithoutVMList(t *testing.T) {
+	r := newRig(t, 0, "")
+	logs := r.captureLogs()
+	r.queue(0, "self-hosted", "large")
+	r.queue(0, "self-hosted", "small")
+	r.tick()
+	r.vms.running["ex-untracked-0009"] = vm.Spec{}
+	var names []string
+	var ids []int64
+	for n, m := range r.l.machines {
+		names = append(names, n)
+		ids = append(ids, m.runnerID)
+	}
+	slices.Sort(names)
+	r.vms.listErr = errors.New("libvirt down")
+	r.l.Shutdown()
+	if !slices.Equal(r.vms.destroyed, names) {
+		t.Errorf("destroyed %q, want %q", r.vms.destroyed, names)
+	}
+	slices.Sort(ids)
+	slices.Sort(r.gh.deleted)
+	if !slices.Equal(r.gh.deleted, ids) {
+		t.Errorf("deleted runners %v, want %v", r.gh.deleted, ids)
+	}
+	if !strings.Contains(logs.String(), `msg="list VMs on shutdown" err="libvirt down"`) {
+		t.Errorf("no warning in log:\n%s", logs)
+	}
+	if _, ok := r.vms.running["ex-untracked-0009"]; !ok {
+		t.Error("destroyed a VM it could not have known about")
+	}
+	if r.vms.pruned != 1 || len(r.l.machines) != 0 {
+		t.Errorf("pruned %d, machines %v", r.vms.pruned, r.l.machines)
+	}
+}
+
+// Shutdown goes past a VM that won't die and keeps its runner, retries
+// earlier failed deletes, and forgets its machines even if pruning fails.
+func TestShutdownCarriesOnPastErrors(t *testing.T) {
+	r := newRig(t, 0, "")
+	logs := r.captureLogs()
+	r.queue(0, "self-hosted", "large")
+	r.queue(0, "self-hosted", "small")
+	r.tick()
+	var stuck, gone *machine
+	for _, m := range r.l.machines {
+		if m.size == "large" {
+			stuck = m
+		} else {
+			gone = m
+		}
+	}
+	r.vms.stuck = map[string]bool{stuck.name: true}
+	r.gh.runners[repo] = append(r.gh.runners[repo], github.Runner{ID: 50, Name: "ex-old"})
+	r.l.pendingDeletes = []runnerRef{{repo, 50}}
+	r.vms.pruneErr = errors.New("permission denied")
+	r.l.Shutdown()
+	if !slices.Equal(r.vms.destroyed, []string{gone.name}) {
+		t.Errorf("destroyed %q, want %q", r.vms.destroyed, gone.name)
+	}
+	slices.Sort(r.gh.deleted)
+	if want := []int64{50, gone.runnerID}; !slices.Equal(r.gh.deleted, want) { // runner IDs start above 100
+		t.Errorf("deleted runners %v, want %v", r.gh.deleted, want)
+	}
+	out := logs.String()
+	for _, want := range []string{
+		`msg="destroy VM on shutdown" vm=` + stuck.name,
+		`msg="remove VM files on shutdown" err="permission denied"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("no %s in log:\n%s", want, out)
+		}
 	}
 	if r.vms.pruned != 1 || len(r.l.machines) != 0 {
 		t.Errorf("pruned %d, machines %v", r.vms.pruned, r.l.machines)
