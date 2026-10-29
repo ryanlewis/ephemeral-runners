@@ -233,7 +233,8 @@ func TestSendResponseEdges(t *testing.T) {
 }
 
 func TestSendRequestErrors(t *testing.T) {
-	c := newClient(t, httptest.NewServer(http.NotFoundHandler()), nil)
+	_, live := newFake(t, time.Now())
+	c := newClient(t, live, nil)
 	ctx := context.Background()
 
 	if _, err := c.send(ctx, http.MethodPost, "http://127.0.0.1:1/x", "token abc", make(chan int), nil); err == nil || !strings.Contains(err.Error(), "unsupported type") {
