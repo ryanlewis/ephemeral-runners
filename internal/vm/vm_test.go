@@ -307,7 +307,9 @@ func TestCreateExistingNameFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	marker := filepath.Join(dir, "keep")
-	os.WriteFile(marker, nil, 0o644)
+	if err := os.WriteFile(marker, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	fr := &fakeRunner{}
 	if err := (&Launcher{Runner: fr}).Create(context.Background(), s); err == nil {
 		t.Fatal("no error")
@@ -323,7 +325,9 @@ func TestCreateExistingNameFails(t *testing.T) {
 func TestAttach(t *testing.T) {
 	state := t.TempDir()
 	name := "er-spare-1a2b"
-	os.Mkdir(filepath.Join(state, name), 0o755)
+	if err := os.Mkdir(filepath.Join(state, name), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	fr := &fakeRunner{}
 	l := &Launcher{URI: "qemu:///system", Runner: fr}
 	if err := l.Attach(context.Background(), state, name, "fake-jit"); err != nil {
@@ -353,7 +357,9 @@ func TestAttach(t *testing.T) {
 func TestAttachFailureRemovesFile(t *testing.T) {
 	state := t.TempDir()
 	name := "er-spare-1a2b"
-	os.Mkdir(filepath.Join(state, name), 0o755)
+	if err := os.Mkdir(filepath.Join(state, name), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	fr := &fakeRunner{err: map[string]error{"virsh attach-disk": errors.New("exit status 1")}}
 	if err := (&Launcher{Runner: fr}).Attach(context.Background(), state, name, "fake-jit"); err == nil {
 		t.Fatal("no error")
@@ -439,8 +445,12 @@ func TestDestroy(t *testing.T) {
 func TestRemove(t *testing.T) {
 	state := t.TempDir()
 	dir := filepath.Join(state, "er-spare-1a2b")
-	os.Mkdir(dir, 0o755)
-	os.WriteFile(filepath.Join(dir, "disk.qcow2"), []byte("x"), 0o644)
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "disk.qcow2"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	l := &Launcher{Runner: &fakeRunner{}}
 	if err := l.Remove(state, "er-spare-1a2b"); err != nil {
 		t.Fatal(err)
@@ -459,9 +469,13 @@ func TestRemove(t *testing.T) {
 func TestPrune(t *testing.T) {
 	state := t.TempDir()
 	for _, n := range []string{"er-running", "er-stopped", "other-vm"} {
-		os.Mkdir(filepath.Join(state, n), 0o755)
+		if err := os.Mkdir(filepath.Join(state, n), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
-	os.WriteFile(filepath.Join(state, "er-file"), nil, 0o644)
+	if err := os.WriteFile(filepath.Join(state, "er-file"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	fr := &fakeRunner{out: map[string][]byte{"virsh list": []byte("er-running\nother-vm\n")}}
 	l := &Launcher{Runner: fr}
 	removed, err := l.Prune(context.Background(), state, "er-")
@@ -528,7 +542,9 @@ func TestConcurrentCreates(t *testing.T) {
 				Image: link, Network: "network:default", StateDir: state, JITConfig: "jit",
 			}
 			errs <- l.Create(context.Background(), s)
-			l.Prune(context.Background(), state, "none-")
+			if _, err := l.Prune(context.Background(), state, "none-"); err != nil {
+				t.Error(err)
+			}
 		})
 	}
 	wg.Wait()
