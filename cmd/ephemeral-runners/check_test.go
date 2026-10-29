@@ -80,7 +80,9 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if code, ok := f.fail[r.Method+" "+r.URL.Path]; ok {
 		w.WriteHeader(code)
-		fmt.Fprintf(w, `{"message":"injected %d"}`, code)
+		if _, err := fmt.Fprintf(w, `{"message":"injected %d"}`, code); err != nil {
+			f.t.Errorf("write injected %d: %v", code, err)
+		}
 		return
 	}
 	if r.URL.Path != "/app/installations/7/access_tokens" && r.Header.Get("Authorization") != "token "+testToken {
@@ -178,7 +180,9 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	w.Write(b)
+	if _, err := w.Write(b); err != nil {
+		f.t.Errorf("write %s: %v", call, err)
+	}
 }
 
 func (f *fakeGitHub) runner() map[string]any {
