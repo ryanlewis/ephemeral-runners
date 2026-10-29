@@ -116,6 +116,9 @@ func TestSizeFor(t *testing.T) {
 		{[]string{"Self-Hosted", "EXAMPLE", "Small"}, "small", true},
 		{[]string{"self-hosted", "example"}, "medium", true},
 		{[]string{"self-hosted", "example", "small", "large"}, "", false},
+		{[]string{"self-hosted", "large", "LARGE"}, "large", true},
+		{[]string{"small"}, "small", true},
+		{[]string{"large", "self-hosted", "gpu"}, "", false},
 		{[]string{"ubuntu-latest"}, "", false},
 		{[]string{"self-hosted", "example", "gpu"}, "", false},
 		{nil, "", false},
@@ -125,5 +128,80 @@ func TestSizeFor(t *testing.T) {
 		if size != tt.size || ok != tt.ok {
 			t.Errorf("SizeFor(%v) = %q, %v; want %q, %v", tt.labels, size, ok, tt.size, tt.ok)
 		}
+	}
+}
+
+func TestValidateErrors(t *testing.T) {
+	tests := []struct {
+		name, from, to, want string
+	}{
+		{"api url not http", `"/k.pem"`, `"/k.pem", "api_url": "ftp://api.github.com"`, `github.api_url "ftp://api.github.com" is not an http(s) URL`},
+		{"api url no host", `"/k.pem"`, `"/k.pem", "api_url": "https://"`, `github.api_url "https://" is not an http(s) URL`},
+		{"api url unparsable", `"/k.pem"`, `"/k.pem", "api_url": "http://[::1"`, `github.api_url "http://[::1" is not an http(s) URL`},
+		{"repo twice", `["example-org/example-repo"]`, `["example-org/example-repo", "Example-Org/Example-Repo"]`, `repo "Example-Org/Example-Repo" is listed twice`},
+		{"blank label", `"example"]`, `"example", " "]`, "labels has an empty label"},
+		{"zero poll interval", `"name_prefix"`, `"poll_interval": "0s", "name_prefix"`, "poll_interval must be more than zero"},
+		{"zero budget vcpus", `"name_prefix"`, `"budget": {"vcpus": 0, "memory_gib": 28}, "sizes": {"medium": {"vcpus": 0, "memory_gib": 4}}, "name_prefix"`,
+			"budget needs vcpus and memory_gib above zero\n" + `size "medium" needs vcpus and memory_gib above zero`},
+		{"zero budget memory", `"name_prefix"`, `"budget": {"vcpus": 24, "memory_gib": 0}, "sizes": {"medium": {"vcpus": 4, "memory_gib": 0}}, "name_prefix"`,
+			"budget needs vcpus and memory_gib above zero\n" + `size "medium" needs vcpus and memory_gib above zero`},
+		{"no sizes", `"name_prefix"`, `"sizes": {}, "name_prefix"`,
+			"sizes is empty\n" + `default_size "medium" is not one of the sizes` + "\n" + `spares.size "medium" is not one of the sizes`},
+		{"blank size name", `"name_prefix"`, `"sizes": {" ": {"vcpus": 1, "memory_gib": 1}, "medium": {"vcpus": 4, "memory_gib": 4}}, "name_prefix"`, "sizes has an empty name"},
+		{"size zero vcpus", `"name_prefix"`, `"sizes": {"medium": {"vcpus": 0, "memory_gib": 4}}, "name_prefix"`, `size "medium" needs vcpus and memory_gib above zero`},
+		{"size zero memory", `"name_prefix"`, `"sizes": {"medium": {"vcpus": 4, "memory_gib": 0}}, "name_prefix"`, `size "medium" needs vcpus and memory_gib above zero`},
+		{"size memory over budget", `"name_prefix"`, `"sizes": {"medium": {"vcpus": 4, "memory_gib": 29}}, "name_prefix"`, `size "medium" (4 vCPU, 29 GiB) is larger than the budget (24 vCPU, 28 GiB)`},
+		{"size vcpus over budget", `"name_prefix"`, `"sizes": {"medium": {"vcpus": 25, "memory_gib": 4}}, "name_prefix"`, `size "medium" (25 vCPU, 4 GiB) is larger than the budget (24 vCPU, 28 GiB)`},
+		{"size label any case", `"example"]`, `"example", "MEDIUM"]`, `size "medium" is also in labels`},
+		{"negative spares", `"name_prefix"`, `"spares": {"count": -1}, "name_prefix"`, "spares.count must not be negative"},
+		{"zero spare idle", `"name_prefix"`, `"spares": {"count": 1, "idle_after": "0s"}, "name_prefix"`, "spares.idle_after must be more than zero"},
+		{"no image", `"name_prefix"`, `"vm": {"image": ""}, "name_prefix"`, "vm.image is missing"},
+		{"no state dir", `"name_prefix"`, `"vm": {"state_dir": ""}, "name_prefix"`, "vm.state_dir is missing"},
+		{"no network", `"name_prefix"`, `"vm": {"network": ""}, "name_prefix"`, "vm.network is missing"},
+		{"no libvirt uri", `"name_prefix"`, `"vm": {"libvirt_uri": ""}, "name_prefix"`, "vm.libvirt_uri is missing"},
+		{"zero online", `"name_prefix"`, `"timeouts": {"online": "0s"}, "name_prefix"`, "timeouts online, idle and job must all be more than zero"},
+		{"zero idle", `"name_prefix"`, `"timeouts": {"idle": "0s"}, "name_prefix"`, "timeouts online, idle and job must all be more than zero"},
+		{"zero job", `"name_prefix"`, `"timeouts": {"job": "0s"}, "name_prefix"`, "timeouts online, idle and job must all be more than zero"},
+		{"zero app id", `"app_id": 1`, `"app_id": 0`, "github.app_id is missing"},
+		{"zero installation", `"installation_id": 2`, `"installation_id": 0`, "github.installation_id is missing"},
+		{"empty prefix", `"name_prefix": "example"`, `"name_prefix": ""`, `name_prefix "" must be lower-case letters, digits and hyphens`},
+		{"prefix ends in hyphen", `"name_prefix": "example"`, `"name_prefix": "example-"`, `name_prefix "example-" must be lower-case letters, digits and hyphens`},
+		{"every problem", `"repos": ["example-org/example-repo"]`, `"repos": [], "poll_interval": "0s"`,
+			"repos is empty\npoll_interval must be more than zero"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			in := strings.Replace(minimal, tt.from, tt.to, 1)
+			if in == minimal {
+				t.Fatalf("replacement %q not found", tt.from)
+			}
+			_, err := Parse([]byte(in))
+			if err == nil || err.Error() != tt.want {
+				t.Errorf("err = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateAccepts(t *testing.T) {
+	tests := []struct {
+		name, from, to string
+	}{
+		{"http api url", `"/k.pem"`, `"/k.pem", "api_url": "http://ghe.example/api/v3"`},
+		{"size equal to budget", `"name_prefix"`, `"budget": {"vcpus": 8, "memory_gib": 8}, "name_prefix"`},
+		{"no spares ignores spare size", `"name_prefix"`, `"spares": {"count": 0, "size": "huge", "idle_after": "0s"}, "name_prefix"`},
+		{"one-character prefix", `"name_prefix": "example"`, `"name_prefix": "x"`},
+		{"prefix with inner hyphen", `"name_prefix": "example"`, `"name_prefix": "ex-1"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			in := strings.Replace(minimal, tt.from, tt.to, 1)
+			if in == minimal {
+				t.Fatalf("replacement %q not found", tt.from)
+			}
+			if _, err := Parse([]byte(in)); err != nil {
+				t.Errorf("err = %v, want nil", err)
+			}
+		})
 	}
 }
