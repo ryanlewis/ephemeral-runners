@@ -572,6 +572,31 @@ func TestCreateFailureDestroysDomain(t *testing.T) {
 	}
 }
 
+// If the domain can't be destroyed after virsh create fails, it may still be
+// running, so Create must keep its files and say why.
+func TestCreateFailureKeepsFilesWhenDestroyFails(t *testing.T) {
+	s := testSpec(t)
+	fr := &fakeRunner{
+		out: map[string][]byte{
+			"virsh create":  []byte("error: it broke\n"),
+			"virsh destroy": []byte("error: failed to connect to the hypervisor\n"),
+		},
+		err: map[string]error{
+			"virsh create":  errors.New("exit status 1"),
+			"virsh destroy": errors.New("exit status 1"),
+		},
+	}
+	l := &Launcher{Runner: fr}
+	err := l.Create(context.Background(), s)
+	if err == nil || !strings.Contains(err.Error(), "it broke") ||
+		!strings.Contains(err.Error(), "failed to connect to the hypervisor") {
+		t.Fatalf("error %v, want both the create and destroy failures", err)
+	}
+	if _, err := os.Stat(filepath.Join(s.StateDir, s.Name, "domain.xml")); err != nil {
+		t.Errorf("vm files removed: %v", err)
+	}
+}
+
 func TestPruneSkipsVMsBeingCreatedUnderAnotherPath(t *testing.T) {
 	real := t.TempDir()
 	link := filepath.Join(t.TempDir(), "state")
