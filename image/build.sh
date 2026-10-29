@@ -16,6 +16,7 @@ RUST_TARGETS=""
 DISK_SIZE=40G
 OUT_DIR=/var/lib/ephemeral-runners/images
 KEEP_IMAGES=3
+METRICS_FILE=""
 
 config=${1:-/etc/ephemeral-runners/image.env}
 if [[ -f $config ]]; then
@@ -35,8 +36,35 @@ packages=(
 read -ra extra <<< "$EXTRA_PACKAGES"
 packages+=("${extra[@]}")
 
+# Records the build's outcome in METRICS_FILE, if set, in the Prometheus text
+# format. A failed build keeps the time of the last one that succeeded.
+write_metrics() {
+  local rc=$1 last=0
+  [[ -n $METRICS_FILE ]] || return 0
+  if [[ $rc -eq 0 ]]; then
+    last=$(date +%s)
+  elif [[ -f $METRICS_FILE ]]; then
+    last=$(awk '$1 == "ephemeral_runners_image_build_last_success_seconds" {print $2}' "$METRICS_FILE")
+  fi
+  {
+    echo "# HELP ephemeral_runners_image_build_last_success_seconds Unix time of the last image build that succeeded, or 0."
+    echo "# TYPE ephemeral_runners_image_build_last_success_seconds gauge"
+    echo "ephemeral_runners_image_build_last_success_seconds ${last:-0}"
+    echo "# HELP ephemeral_runners_image_build_last_exit_code Exit code of the last image build."
+    echo "# TYPE ephemeral_runners_image_build_last_exit_code gauge"
+    echo "ephemeral_runners_image_build_last_exit_code $rc"
+  } > "$METRICS_FILE.tmp"
+  chmod 0644 "$METRICS_FILE.tmp"
+  mv -f "$METRICS_FILE.tmp" "$METRICS_FILE"
+}
+
 work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+on_exit() {
+  local rc=$?
+  rm -rf "$work"
+  write_metrics "$rc"
+}
+trap on_exit EXIT
 
 debian=https://cloud.debian.org/images/cloud/trixie/latest
 image="debian-13-genericcloud-amd64.qcow2"

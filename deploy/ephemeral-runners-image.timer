@@ -1,0 +1,11 @@
+[Unit]
+Description=Rebuild the ephemeral-runners VM image weekly
+Documentation=https://github.com/ryanlewis/ephemeral-runners
+
+[Timer]
+OnCalendar=weekly
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
