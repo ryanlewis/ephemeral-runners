@@ -282,20 +282,25 @@ func (l *Loop) Tick(ctx context.Context) time.Duration {
 	l.reap(ctx)
 	l.retryDeletes(ctx)
 
+	// A repo that fails is skipped, so the others are still served and
+	// the time limits still apply. A rate limit covers the whole
+	// installation, so it stops the tick's GitHub calls.
 	jobs, err := l.poll(ctx, now)
-	if err == nil {
-		err = l.checkRunners(ctx, now)
+	if !errors.Is(err, github.ErrRateLimited) {
+		err = errors.Join(err, l.checkRunners(ctx, now))
 	}
+	if err == nil {
+		l.lastPoll = now
+	}
+	l.timeouts(ctx, now)
+	if !errors.Is(err, github.ErrRateLimited) {
+		err = errors.Join(err, l.launch(ctx, now, jobs))
+	}
+	l.keepSpares(ctx, now)
 	if err != nil {
 		return l.failed(err, now)
 	}
-	l.lastPoll = now
-	l.timeouts(ctx, now)
-	if err := l.launch(ctx, now, jobs); err != nil {
-		return l.failed(err, now)
-	}
 	l.backoff = 0
-	l.keepSpares(ctx, now)
 	return l.cfg.PollInterval.D()
 }
 
@@ -366,7 +371,9 @@ func (l *Loop) retryDeletes(ctx context.Context) {
 }
 
 // poll returns the queued jobs this host serves, oldest first. It looks at
-// queued runs every tick and in-progress runs every inProgressEvery.
+// queued runs every tick and in-progress runs every inProgressEvery. It
+// skips a repo that fails and returns the errors with the other repos'
+// jobs; a rate limit stops it.
 func (l *Loop) poll(ctx context.Context, now time.Time) ([]job, error) {
 	statuses := []string{"queued"}
 	inProgress := now.Sub(l.lastInProgress) >= inProgressEvery
@@ -374,10 +381,15 @@ func (l *Loop) poll(ctx context.Context, now time.Time) ([]job, error) {
 		statuses = append(statuses, "in_progress")
 	}
 	var jobs []job
+	var errs error
 	for _, repo := range l.cfg.Repos {
 		js, err := l.gh.QueuedJobs(ctx, repo, statuses...)
 		if err != nil {
-			return nil, fmt.Errorf("%s: queued jobs: %w", repo, err)
+			errs = errors.Join(errs, fmt.Errorf("%s: queued jobs: %w", repo, err))
+			if errors.Is(err, github.ErrRateLimited) {
+				break
+			}
+			continue
 		}
 		for _, j := range js {
 			if size, ok := l.cfg.SizeFor(j.Labels); ok {
@@ -385,7 +397,8 @@ func (l *Loop) poll(ctx context.Context, now time.Time) ([]job, error) {
 			}
 		}
 	}
-	if inProgress {
+	// The in-progress jobs are kept only from a poll of every repo.
+	if inProgress && errs == nil {
 		l.lastInProgress = now
 		l.inProgressJobs = l.inProgressJobs[:0]
 		for _, j := range jobs {
@@ -396,12 +409,14 @@ func (l *Loop) poll(ctx context.Context, now time.Time) ([]job, error) {
 	if len(jobs) > 0 {
 		l.lastJob = now
 	}
-	return jobs, nil
+	return jobs, errs
 }
 
 // checkRunners asks GitHub about the runners that have not taken a job
-// yet, one request per repo that has any.
+// yet, one request per repo that has any. Like poll, it skips a repo that
+// fails and stops at a rate limit.
 func (l *Loop) checkRunners(ctx context.Context, now time.Time) error {
+	var errs error
 	byRepo := map[string][]*machine{}
 	for _, m := range l.sorted() {
 		if m.state == starting || m.state == idle {
@@ -415,7 +430,11 @@ func (l *Loop) checkRunners(ctx context.Context, now time.Time) error {
 		}
 		runners, err := l.gh.ListRunners(ctx, repo)
 		if err != nil {
-			return fmt.Errorf("%s: list runners: %w", repo, err)
+			errs = errors.Join(errs, fmt.Errorf("%s: list runners: %w", repo, err))
+			if errors.Is(err, github.ErrRateLimited) {
+				break
+			}
+			continue
 		}
 		for _, m := range ms {
 			i := slices.IndexFunc(runners, func(r github.Runner) bool { return r.ID == m.runnerID })
@@ -431,7 +450,7 @@ func (l *Loop) checkRunners(ctx context.Context, now time.Time) error {
 			}
 		}
 	}
-	return nil
+	return errs
 }
 
 func (l *Loop) setBusy(m *machine, now time.Time, why string) {
