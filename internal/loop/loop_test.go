@@ -831,6 +831,73 @@ func TestRateLimitedPollStillEnforcesLimits(t *testing.T) {
 	}
 }
 
+// A runner the loop could not check on is not held to the online or idle
+// limits that tick: its VM may well have taken a job.
+func TestUncheckedRunnerNotTimedOut(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fail func(*fakeGitHub)
+	}{
+		{"list runners fails", func(f *fakeGitHub) {
+			f.runnersErr = map[string]error{repo: &github.APIError{StatusCode: 502}}
+		}},
+		{"rate limited", func(f *fakeGitHub) {
+			f.jobsErr = &github.APIError{StatusCode: 403, RateLimited: true}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(t, 0, "")
+			j := r.queue(0, "self-hosted", "small")
+			r.tick()
+			name := r.vms.created[0].Name
+			r.take(j)
+			r.gh.setRunner(name, "online", true)
+			tc.fail(r.gh)
+			r.clock.advance(r.cfg.Timeouts.Online.D() + time.Minute)
+			r.tick()
+			if len(r.vms.destroyed) != 0 {
+				t.Errorf("destroyed %q without checking its runner", r.vms.destroyed)
+			}
+		})
+	}
+}
+
+// One failing repo doesn't make the loop poll in-progress runs every tick.
+func TestOneRepoFailingKeepsInProgressPace(t *testing.T) {
+	const other = "example-org/other-repo"
+	r := newRig(t, 0, "")
+	r.l.cfg.Repos = []string{other, repo}
+	r.gh.queuedErr = map[string]error{other: &github.APIError{StatusCode: 404}}
+	for range 3 {
+		r.tick()
+		r.clock.advance(5 * time.Second)
+	}
+	n := 0
+	for _, s := range r.gh.statuses {
+		if slices.Contains(s, "in_progress") {
+			n++
+		}
+	}
+	if n != 2 { // both repos, on the first tick only
+		t.Errorf("polled in-progress runs %d times, want 2: %q", n, r.gh.statuses)
+	}
+}
+
+// A rate limit's Retry-After is honoured when another repo failed first.
+func TestRetryAfterBehindOtherRepoError(t *testing.T) {
+	const other = "example-org/other-repo"
+	r := newRig(t, 0, "")
+	r.l.cfg.Repos = []string{other, repo}
+	r.gh.rate = github.RateLimit{Remaining: 100}
+	r.gh.queuedErr = map[string]error{
+		other: &github.APIError{StatusCode: 404},
+		repo:  &github.APIError{StatusCode: 403, RateLimited: true, RetryAfter: 5 * time.Minute},
+	}
+	if d := r.tick(); d != 5*time.Minute {
+		t.Errorf("wait %s, want 5m", d)
+	}
+}
+
 func TestRunStopsOnCancel(t *testing.T) {
 	r := newRig(t, 0, "")
 	ctx, cancel := context.WithCancel(context.Background())

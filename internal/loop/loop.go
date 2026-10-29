@@ -141,9 +141,10 @@ type Loop struct {
 	pendingDeletes []runnerRef
 	lastJob        time.Time // when a job this host serves was last seen
 	lastInProgress time.Time // when in-progress runs were last polled
-	// inProgressJobs are the jobs seen when in-progress runs were last
-	// polled. Ticks in between don't see jobs of in-progress runs.
-	inProgressJobs []int64
+	// inProgressJobs are the jobs seen, by repo, when in-progress runs
+	// were last polled. Ticks in between don't see jobs of in-progress
+	// runs.
+	inProgressJobs map[string][]int64
 	backoff        time.Duration
 
 	jobsStarted    int64
@@ -161,6 +162,8 @@ func New(o Options) *Loop {
 		log:      o.Logger,
 		resolve:  o.ResolveImage,
 		machines: map[string]*machine{},
+
+		inProgressJobs: map[string][]int64{},
 	}
 	if l.clock == nil {
 		l.clock = realClock{}
@@ -286,13 +289,16 @@ func (l *Loop) Tick(ctx context.Context) time.Duration {
 	// the time limits still apply. A rate limit covers the whole
 	// installation, so it stops the tick's GitHub calls.
 	jobs, err := l.poll(ctx, now)
+	var checked map[string]bool
 	if !errors.Is(err, github.ErrRateLimited) {
-		err = errors.Join(err, l.checkRunners(ctx, now))
+		var cerr error
+		checked, cerr = l.checkRunners(ctx, now)
+		err = errors.Join(err, cerr)
 	}
 	if err == nil {
 		l.lastPoll = now
 	}
-	l.timeouts(ctx, now)
+	l.timeouts(ctx, now, checked)
 	if !errors.Is(err, github.ErrRateLimited) {
 		err = errors.Join(err, l.launch(ctx, now, jobs))
 	}
@@ -311,8 +317,7 @@ func (l *Loop) failed(err error, now time.Time) time.Duration {
 		// A secondary limit says how long to wait in Retry-After, and
 		// leaves the primary limit's requests remaining.
 		var wait time.Duration
-		var apiErr *github.APIError
-		if rl := l.gh.RateLimit(); errors.As(err, &apiErr) && apiErr.RetryAfter > 0 {
+		if rl, apiErr := l.gh.RateLimit(), rateLimitError(err); apiErr != nil && apiErr.RetryAfter > 0 {
 			wait = apiErr.RetryAfter
 		} else if rl.Remaining == 0 {
 			wait = rl.Reset.Sub(now)
@@ -326,6 +331,25 @@ func (l *Loop) failed(err error, now time.Time) time.Duration {
 	l.backoff = min(max(l.backoff*2, minBackoff), maxBackoff)
 	l.log.Warn("GitHub request failed, backing off", "wait", l.backoff, "err", err)
 	return l.backoff
+}
+
+// rateLimitError returns the rate-limited API error in err, which may hold
+// other repos' errors too.
+func rateLimitError(err error) *github.APIError {
+	if apiErr, ok := err.(*github.APIError); ok && errors.Is(apiErr, github.ErrRateLimited) {
+		return apiErr
+	}
+	switch e := err.(type) {
+	case interface{ Unwrap() []error }:
+		for _, e := range e.Unwrap() {
+			if apiErr := rateLimitError(e); apiErr != nil {
+				return apiErr
+			}
+		}
+	case interface{ Unwrap() error }:
+		return rateLimitError(e.Unwrap())
+	}
+	return nil
 }
 
 // reap forgets VMs that are no longer running: it removes their files and
@@ -391,19 +415,20 @@ func (l *Loop) poll(ctx context.Context, now time.Time) ([]job, error) {
 			}
 			continue
 		}
+		var ids []int64
 		for _, j := range js {
 			if size, ok := l.cfg.SizeFor(j.Labels); ok {
 				jobs = append(jobs, job{repo: repo, size: size, Job: j})
+				ids = append(ids, j.ID)
 			}
 		}
-	}
-	// The in-progress jobs are kept only from a poll of every repo.
-	if inProgress && errs == nil {
-		l.lastInProgress = now
-		l.inProgressJobs = l.inProgressJobs[:0]
-		for _, j := range jobs {
-			l.inProgressJobs = append(l.inProgressJobs, j.ID)
+		// A repo that failed keeps the jobs from its last poll.
+		if inProgress {
+			l.inProgressJobs[repo] = ids
 		}
+	}
+	if inProgress {
+		l.lastInProgress = now
 	}
 	slices.SortStableFunc(jobs, func(a, b job) int { return a.CreatedAt.Compare(b.CreatedAt) })
 	if len(jobs) > 0 {
@@ -414,8 +439,9 @@ func (l *Loop) poll(ctx context.Context, now time.Time) ([]job, error) {
 
 // checkRunners asks GitHub about the runners that have not taken a job
 // yet, one request per repo that has any. Like poll, it skips a repo that
-// fails and stops at a rate limit.
-func (l *Loop) checkRunners(ctx context.Context, now time.Time) error {
+// fails and stops at a rate limit. It returns the repos it checked.
+func (l *Loop) checkRunners(ctx context.Context, now time.Time) (map[string]bool, error) {
+	checked := map[string]bool{}
 	var errs error
 	byRepo := map[string][]*machine{}
 	for _, m := range l.sorted() {
@@ -426,6 +452,7 @@ func (l *Loop) checkRunners(ctx context.Context, now time.Time) error {
 	for _, repo := range l.cfg.Repos {
 		ms := byRepo[repo]
 		if len(ms) == 0 {
+			checked[repo] = true
 			continue
 		}
 		runners, err := l.gh.ListRunners(ctx, repo)
@@ -436,6 +463,7 @@ func (l *Loop) checkRunners(ctx context.Context, now time.Time) error {
 			}
 			continue
 		}
+		checked[repo] = true
 		for _, m := range ms {
 			i := slices.IndexFunc(runners, func(r github.Runner) bool { return r.ID == m.runnerID })
 			switch {
@@ -450,7 +478,7 @@ func (l *Loop) checkRunners(ctx context.Context, now time.Time) error {
 			}
 		}
 	}
-	return errs
+	return checked, errs
 }
 
 func (l *Loop) setBusy(m *machine, now time.Time, why string) {
@@ -469,8 +497,9 @@ func (l *Loop) setState(m *machine, s state, why string) {
 }
 
 // timeouts destroys VMs whose runner did not come online, did not take a
-// job, or has run past the job limit.
-func (l *Loop) timeouts(ctx context.Context, now time.Time) {
+// job, or has run past the job limit. The first two need a runner state
+// from this tick, so they apply only to the repos checked.
+func (l *Loop) timeouts(ctx context.Context, now time.Time, checked map[string]bool) {
 	t := l.cfg.Timeouts
 	for _, m := range l.sorted() {
 		var why string
@@ -479,6 +508,8 @@ func (l *Loop) timeouts(ctx context.Context, now time.Time) {
 			continue
 		case now.Sub(m.assigned) > t.Job.D():
 			why = "past the job time limit"
+		case !checked[m.repo]:
+			continue
 		case m.state == starting && now.Sub(m.assigned) > t.Online.D():
 			why = "runner did not come online in time"
 		case m.state == idle && now.Sub(m.online) > t.Idle.D():
@@ -533,9 +564,11 @@ func (l *Loop) launch(ctx context.Context, now time.Time, jobs []job) error {
 			covered[m] = true
 		}
 	}
-	for _, id := range l.inProgressJobs {
-		if m := launchedFor[id]; m != nil {
-			covered[m] = true
+	for _, ids := range l.inProgressJobs {
+		for _, id := range ids {
+			if m := launchedFor[id]; m != nil {
+				covered[m] = true
+			}
 		}
 	}
 	supply := map[[2]string]int{}
