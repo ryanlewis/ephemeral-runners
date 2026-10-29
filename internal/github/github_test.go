@@ -51,7 +51,7 @@ func newFake(t *testing.T, now time.Time) (*fakeGitHub, *httptest.Server) {
 			return
 		}
 		n := f.tokens.Add(1)
-		json.NewEncoder(w).Encode(map[string]any{"token": fmt.Sprintf("tok-%d", n), "expires_at": time.Unix(f.expires.Load(), 0)})
+		encodeBody(t, w, map[string]any{"token": fmt.Sprintf("tok-%d", n), "expires_at": time.Unix(f.expires.Load(), 0)})
 	})
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
@@ -140,6 +140,22 @@ func decodePart(t *testing.T, part string, v any) {
 	}
 }
 
+// writeBody and encodeBody are for handlers that run off the test goroutine,
+// so a failed write is reported with t.Error rather than t.Fatal.
+func writeBody(t *testing.T, w http.ResponseWriter, s string) {
+	t.Helper()
+	if _, err := io.WriteString(w, s); err != nil {
+		t.Error(err)
+	}
+}
+
+func encodeBody(t *testing.T, w http.ResponseWriter, v any) {
+	t.Helper()
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		t.Error(err)
+	}
+}
+
 func TestTokenRefresh(t *testing.T) {
 	start := time.Unix(1_800_000_000, 0)
 	var mu sync.Mutex
@@ -151,7 +167,7 @@ func TestTokenRefresh(t *testing.T) {
 		mu.Lock()
 		seen = append(seen, r.Header.Get("Authorization"))
 		mu.Unlock()
-		io.WriteString(w, `{"resources":{"core":{"limit":5000,"remaining":4999,"used":1,"reset":1800003600}}}`)
+		writeBody(t, w, `{"resources":{"core":{"limit":5000,"remaining":4999,"used":1,"reset":1800003600}}}`)
 	})
 	c := newClient(t, srv, clock)
 	ctx := context.Background()
@@ -205,7 +221,7 @@ func TestUnauthorizedDropsToken(t *testing.T) {
 			http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
 			return
 		}
-		io.WriteString(w, `{"id":1,"name":"r"}`)
+		writeBody(t, w, `{"id":1,"name":"r"}`)
 	})
 	c := newClient(t, srv, nil)
 	ctx := context.Background()
@@ -238,7 +254,7 @@ func TestNotModified(t *testing.T) {
 			return
 		}
 		w.Header().Set("ETag", `"v1"`)
-		io.WriteString(w, `{"id":5,"name":"example-a","status":"online","busy":true,"labels":[{"name":"self-hosted"},{"name":"small"}]}`)
+		writeBody(t, w, `{"id":5,"name":"example-a","status":"online","busy":true,"labels":[{"name":"self-hosted"},{"name":"small"}]}`)
 	})
 	c := newClient(t, srv, nil)
 	ctx := context.Background()
@@ -276,10 +292,10 @@ func TestListRunnersPaginates(t *testing.T) {
 		switch r.URL.Query().Get("page") {
 		case "":
 			w.Header().Set("Link", fmt.Sprintf(`<%s/repos/example-org/example-repo/actions/runners?per_page=100&page=2>; rel="next", <%[1]s/x?page=2>; rel="last"`, "http://"+r.Host))
-			io.WriteString(w, `{"total_count":3,"runners":[{"id":1,"name":"a"},{"id":2,"name":"b"}]}`)
+			writeBody(t, w, `{"total_count":3,"runners":[{"id":1,"name":"a"},{"id":2,"name":"b"}]}`)
 		case "2":
 			w.Header().Set("Link", fmt.Sprintf(`<%s/repos/example-org/example-repo/actions/runners?per_page=100&page=1>; rel="prev"`, "http://"+r.Host))
-			io.WriteString(w, `{"total_count":3,"runners":[{"id":3,"name":"c","status":"offline"}]}`)
+			writeBody(t, w, `{"total_count":3,"runners":[{"id":3,"name":"c","status":"offline"}]}`)
 		}
 	})
 	c := newClient(t, srv, nil)
@@ -307,9 +323,9 @@ func TestPaginatesAfterNotModified(t *testing.T) {
 		switch page {
 		case "":
 			w.Header().Set("Link", fmt.Sprintf(`<%s/repos/example-org/example-repo/actions/runners?per_page=100&page=2>; rel="next"`, "http://"+r.Host))
-			io.WriteString(w, `{"runners":[{"id":1,"name":"a"},{"id":2,"name":"b"}]}`)
+			writeBody(t, w, `{"runners":[{"id":1,"name":"a"},{"id":2,"name":"b"}]}`)
 		case "2":
-			io.WriteString(w, `{"runners":[{"id":3,"name":"c"}]}`)
+			writeBody(t, w, `{"runners":[{"id":3,"name":"c"}]}`)
 		}
 	})
 	c := newClient(t, srv, nil)
@@ -331,7 +347,7 @@ func TestNextLinkToOtherHostRefused(t *testing.T) {
 	f, srv := newFake(t, time.Now())
 	f.HandleFunc("GET /repos/example-org/example-repo/actions/runners", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Link", `<https://elsewhere.example/steal?page=2>; rel="next"`)
-		io.WriteString(w, `{"runners":[]}`)
+		writeBody(t, w, `{"runners":[]}`)
 	})
 	c := newClient(t, srv, nil)
 	if _, err := c.ListRunners(context.Background(), "example-org/example-repo"); err == nil || !strings.Contains(err.Error(), "refusing") {
@@ -365,7 +381,7 @@ func TestErrorMapping(t *testing.T) {
 					w.Header().Set(k, v)
 				}
 				w.WriteHeader(tt.status)
-				io.WriteString(w, `{"message":"nope"}`)
+				writeBody(t, w, `{"message":"nope"}`)
 			})
 			c := newClient(t, srv, nil)
 			err := c.DeleteRunner(context.Background(), "example-org/example-repo", 9)
@@ -391,9 +407,9 @@ func TestQueuedJobs(t *testing.T) {
 	f.HandleFunc("GET /repos/example-org/example-repo/actions/runs", func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Query().Get("status") {
 		case "queued":
-			io.WriteString(w, `{"workflow_runs":[{"id":100}]}`)
+			writeBody(t, w, `{"workflow_runs":[{"id":100}]}`)
 		case "in_progress":
-			io.WriteString(w, `{"workflow_runs":[{"id":100},{"id":200}]}`)
+			writeBody(t, w, `{"workflow_runs":[{"id":100},{"id":200}]}`)
 		default:
 			http.Error(w, "bad status", 400)
 		}
@@ -401,12 +417,12 @@ func TestQueuedJobs(t *testing.T) {
 	var runCalls atomic.Int64
 	f.HandleFunc("GET /repos/example-org/example-repo/actions/runs/100/jobs", func(w http.ResponseWriter, r *http.Request) {
 		runCalls.Add(1)
-		io.WriteString(w, `{"jobs":[
+		writeBody(t, w, `{"jobs":[
 			{"id":1,"run_id":100,"name":"late","status":"queued","labels":["self-hosted","large"],"created_at":"2026-01-01T00:02:00Z"},
 			{"id":2,"run_id":100,"name":"done","status":"completed","labels":["self-hosted"],"created_at":"2026-01-01T00:00:00Z"}]}`)
 	})
 	f.HandleFunc("GET /repos/example-org/example-repo/actions/runs/200/jobs", func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, `{"jobs":[
+		writeBody(t, w, `{"jobs":[
 			{"id":3,"run_id":200,"name":"early","status":"queued","labels":["self-hosted","small"],"created_at":"2026-01-01T00:01:00Z"},
 			{"id":4,"run_id":200,"name":"running","status":"in_progress","labels":["self-hosted"],"created_at":"2026-01-01T00:00:00Z"}]}`)
 	})
@@ -441,16 +457,16 @@ func TestQueuedJobsSkipsDeletedRun(t *testing.T) {
 	f, srv := newFake(t, time.Now())
 	f.HandleFunc("GET /repos/example-org/example-repo/actions/runs", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("status") == "queued" {
-			io.WriteString(w, `{"workflow_runs":[{"id":100},{"id":200}]}`)
+			writeBody(t, w, `{"workflow_runs":[{"id":100},{"id":200}]}`)
 			return
 		}
-		io.WriteString(w, `{"workflow_runs":[]}`)
+		writeBody(t, w, `{"workflow_runs":[]}`)
 	})
 	f.HandleFunc("GET /repos/example-org/example-repo/actions/runs/100/jobs", func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
 	})
 	f.HandleFunc("GET /repos/example-org/example-repo/actions/runs/200/jobs", func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, `{"jobs":[{"id":3,"run_id":200,"name":"a","status":"queued","labels":["self-hosted"],"created_at":"2026-01-01T00:01:00Z"}]}`)
+		writeBody(t, w, `{"jobs":[{"id":3,"run_id":200,"name":"a","status":"queued","labels":["self-hosted"],"created_at":"2026-01-01T00:01:00Z"}]}`)
 	})
 	c := newClient(t, srv, nil)
 	jobs, err := c.QueuedJobs(context.Background(), "example-org/example-repo")
@@ -473,7 +489,7 @@ func TestTokenResponseKeepsRateLimit(t *testing.T) {
 	f.HandleFunc("POST /app/installations/7/access_tokens", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-RateLimit-Limit", "60")
 		w.Header().Set("X-RateLimit-Remaining", "59")
-		json.NewEncoder(w).Encode(map[string]any{"token": "tok", "expires_at": clock().Add(time.Hour)})
+		encodeBody(t, w, map[string]any{"token": "tok", "expires_at": clock().Add(time.Hour)})
 	})
 	f.HandleFunc("GET /repos/example-org/example-repo/actions/runners/5", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("ETag", `"v1"`)
@@ -483,7 +499,7 @@ func TestTokenResponseKeepsRateLimit(t *testing.T) {
 		}
 		w.Header().Set("X-RateLimit-Limit", "5000")
 		w.Header().Set("X-RateLimit-Remaining", "4990")
-		io.WriteString(w, `{"id":5}`)
+		writeBody(t, w, `{"id":5}`)
 	})
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
@@ -517,11 +533,11 @@ func TestGenerateJITConfig(t *testing.T) {
 			return
 		}
 		if body.Name != "example-check-ab12" || body.RunnerGroupID != 1 || body.WorkFolder != "_work" || strings.Join(body.Labels, ",") != "self-hosted,example" {
-			http.Error(w, fmt.Sprintf(`{"message":"bad body %+v"}`, body), 422)
+			http.Error(w, fmt.Sprintf(`{"message":"bad body %+v"}`, body), http.StatusUnprocessableEntity)
 			return
 		}
 		w.WriteHeader(http.StatusCreated)
-		io.WriteString(w, `{"runner":{"id":77,"name":"example-check-ab12"},"encoded_jit_config":"ZW5jb2RlZA=="}`)
+		writeBody(t, w, `{"runner":{"id":77,"name":"example-check-ab12"},"encoded_jit_config":"ZW5jb2RlZA=="}`)
 	})
 	c := newClient(t, srv, nil)
 	jit, err := c.GenerateJITConfig(context.Background(), "example-org/example-repo", "example-check-ab12", []string{"self-hosted", "example"})

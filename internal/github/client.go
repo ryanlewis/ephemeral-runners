@@ -277,7 +277,7 @@ func (c *Client) send(ctx context.Context, method, u, auth string, body, out any
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
 	if err != nil {
 		return nil, fmt.Errorf("%s %s: read body: %w", method, req.URL.Redacted(), err)
