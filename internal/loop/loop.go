@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -33,6 +34,7 @@ type GitHub interface {
 	QueuedJobs(ctx context.Context, repo string, runStatuses ...string) ([]github.Job, error)
 	GenerateJITConfig(ctx context.Context, repo, name string, labels []string) (*github.JITConfig, error)
 	ListRunners(ctx context.Context, repo string) ([]github.Runner, error)
+	JobStatus(ctx context.Context, repo string, id int64) (string, error)
 	DeleteRunner(ctx context.Context, repo string, id int64) error
 	RateLimit() github.RateLimit
 }
@@ -68,6 +70,9 @@ const (
 	// queueLag is how long GitHub can go on listing a job as queued after
 	// a runner has taken it.
 	queueLag = time.Minute
+	// jobRecheck is how often the loop asks GitHub about a job it has
+	// launched for before and that is still listed as queued.
+	jobRecheck = 30 * time.Second
 )
 
 // shutdownTimeout bounds the clean-up on the way out. It is a variable so
@@ -118,6 +123,13 @@ type runnerRef struct {
 	id   int64
 }
 
+// launchedJob is a job the loop has launched a VM for, kept while GitHub
+// lists the job.
+type launchedJob struct {
+	checked time.Time // when GitHub last said it is still queued
+	started bool      // GitHub said it has started or gone
+}
+
 type job struct {
 	repo string
 	size string
@@ -154,6 +166,7 @@ type Loop struct {
 	// were last polled. Ticks in between don't see jobs of in-progress
 	// runs.
 	inProgressJobs map[string][]int64
+	launchedJobs   map[int64]*launchedJob
 	backoff        time.Duration
 
 	jobsStarted    int64
@@ -173,6 +186,7 @@ func New(o Options) *Loop {
 		machines: map[string]*machine{},
 
 		inProgressJobs: map[string][]int64{},
+		launchedJobs:   map[int64]*launchedJob{},
 	}
 	if l.clock == nil {
 		l.clock = realClock{}
@@ -458,6 +472,11 @@ func (l *Loop) poll(ctx context.Context, now time.Time) ([]job, error) {
 	var errs error
 	for _, repo := range l.cfg.Repos {
 		js, err := l.gh.QueuedJobs(ctx, repo, statuses...)
+		var skipped *github.SkippedRunsError
+		if errors.As(err, &skipped) {
+			l.log.Warn("skipped runs whose jobs GitHub failed to list", "repo", repo, "runs", skipped.RunIDs, "err", skipped.Err)
+			err = nil
+		}
 		if err != nil {
 			errs = errors.Join(errs, fmt.Errorf("%s: queued jobs: %w", repo, err))
 			if errors.Is(err, github.ErrRateLimited) {
@@ -472,8 +491,13 @@ func (l *Loop) poll(ctx context.Context, now time.Time) ([]job, error) {
 				ids = append(ids, j.ID)
 			}
 		}
-		// A repo that failed keeps the jobs from its last poll.
+		// A repo that failed keeps the jobs from its last poll, and one
+		// with skipped runs keeps them too, since those runs may still
+		// have them queued.
 		if inProgress {
+			if skipped != nil {
+				ids = append(ids, l.inProgressJobs[repo]...)
+			}
 			l.inProgressJobs[repo] = ids
 		}
 	}
@@ -590,7 +614,8 @@ func (l *Loop) kill(ctx context.Context, m *machine, why string) bool {
 
 // launch starts a runner for each job that no runner is coming for. Jobs of
 // the spare size go to free spares first, since that is quick and would
-// otherwise be undone by making room for a cold start. The rest start
+// otherwise be undone by making room for a cold start. A job launched for
+// before is checked with GitHub first, in case it has started. The rest start
 // oldest first while the budget allows; a job that doesn't fit waits, and
 // so do the younger ones behind it. GitHub errors are returned, so the tick
 // backs off; VM errors only count as failed launches.
@@ -629,10 +654,27 @@ func (l *Loop) launch(ctx context.Context, now time.Time, jobs []job) error {
 			supply[[2]string{m.repo, m.size}]++
 		}
 	}
+	listed := map[int64]bool{}
+	for _, j := range jobs {
+		listed[j.ID] = true
+	}
+	for _, ids := range l.inProgressJobs {
+		for _, id := range ids {
+			listed[id] = true
+		}
+	}
+	maps.DeleteFunc(l.launchedJobs, func(id int64, _ *launchedJob) bool { return !listed[id] })
 	var wanted []job
 	for _, j := range jobs {
 		k := [2]string{j.repo, j.size}
 		if launchedFor[j.ID] != nil {
+			continue
+		}
+		started, err := l.alreadyStarted(ctx, now, j)
+		if err != nil {
+			return err
+		}
+		if started {
 			continue
 		}
 		if supply[k] > 0 {
@@ -667,6 +709,43 @@ func (l *Loop) launch(ctx context.Context, now time.Time, jobs []job) error {
 		}
 	}
 	return nil
+}
+
+// alreadyStarted reports whether a job that the loop launched for before,
+// and that no VM covers now, has in fact left the queue. While GitHub is
+// struggling, a run's list of jobs can show a job as queued for minutes
+// after it started or even finished, and each VM launched for it would sit
+// idle. The job's own status is up to date. The loop asks for it at most
+// every jobRecheck per job. An error other than a rate limit lets the job
+// launch, as it would without the check.
+func (l *Loop) alreadyStarted(ctx context.Context, now time.Time, j job) (bool, error) {
+	lj := l.launchedJobs[j.ID]
+	switch {
+	case lj == nil:
+		return false, nil
+	case lj.started:
+		return true, nil
+	case !lj.checked.IsZero() && now.Sub(lj.checked) < jobRecheck:
+		return false, nil
+	}
+	status, err := l.gh.JobStatus(ctx, j.repo, j.ID)
+	switch {
+	case errors.Is(err, github.ErrNotFound):
+		status = "gone"
+	case errors.Is(err, github.ErrRateLimited):
+		return false, fmt.Errorf("%s: job status: %w", j.repo, err)
+	case err != nil:
+		l.log.Warn("check job before launching for it again", "repo", j.repo, "job", j.ID, "err", err)
+		return false, nil
+	}
+	if status != "in_progress" && status != "completed" && status != "gone" {
+		lj.checked = now
+		return false, nil
+	}
+	lj.started = true
+	l.log.Info("job listed as queued has already started, not launching for it again",
+		"repo", j.repo, "job", j.ID, "status", status)
+	return true, nil
 }
 
 // fits reports whether a VM of size fits in the budget beside the VMs that
@@ -766,6 +845,7 @@ func (l *Loop) handOver(ctx context.Context, now time.Time, s *machine, j job) e
 		return nil
 	}
 	s.repo, s.jobID, s.runnerID, s.runner, s.assigned = j.repo, j.ID, jit.RunnerID, name, now
+	l.noteLaunch(j.ID)
 	l.jobsStarted++
 	l.setState(s, starting, "handed job to spare")
 	l.log.Info("launched", "vm", s.name, "runner", name, "repo", j.repo, "size", j.size,
@@ -796,10 +876,17 @@ func (l *Loop) coldStart(ctx context.Context, now time.Time, j job) error {
 		name: name, size: j.size, image: image, created: now, state: starting,
 		repo: j.repo, jobID: j.ID, runnerID: jit.RunnerID, runner: name, assigned: now,
 	}
+	l.noteLaunch(j.ID)
 	l.jobsStarted++
 	l.log.Info("launched", "vm", name, "runner", name, "repo", j.repo, "size", j.size,
 		"job", j.ID, "queued_for", now.Sub(j.CreatedAt).Round(time.Second), "spare", false)
 	return nil
+}
+
+func (l *Loop) noteLaunch(id int64) {
+	if l.launchedJobs[id] == nil {
+		l.launchedJobs[id] = &launchedJob{}
+	}
 }
 
 // keepSpares keeps spares.count spares booted while jobs have been seen

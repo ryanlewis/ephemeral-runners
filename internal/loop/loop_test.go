@@ -35,6 +35,9 @@ type fakeGitHub struct {
 	jitErr     error
 	deleteErr  error
 	runnersErr map[string]error // ListRunners error, by repo
+	jobStatus  map[int64]string // JobStatus answer, by job; by default whether the job is listed
+	statusErr  error
+	statusAsks []int64 // jobs asked about, per JobStatus call
 	rate       github.RateLimit
 	statuses   [][]string // run statuses asked for, per QueuedJobs call
 	deleted    []int64
@@ -71,6 +74,20 @@ func (f *fakeGitHub) ListRunners(_ context.Context, repo string) ([]github.Runne
 		return nil, err
 	}
 	return slices.Clone(f.runners[repo]), nil
+}
+
+func (f *fakeGitHub) JobStatus(_ context.Context, repo string, id int64) (string, error) {
+	f.statusAsks = append(f.statusAsks, id)
+	if f.statusErr != nil {
+		return "", f.statusErr
+	}
+	if s, ok := f.jobStatus[id]; ok {
+		return s, nil
+	}
+	if slices.ContainsFunc(f.jobs[repo], func(j github.Job) bool { return j.ID == id }) {
+		return "queued", nil
+	}
+	return "completed", nil
 }
 
 func (f *fakeGitHub) DeleteRunner(_ context.Context, repo string, id int64) error {
@@ -1505,4 +1522,134 @@ func TestFailedStartWaitsFromFailure(t *testing.T) {
 	if len(r.vms.removed) != 1 {
 		t.Errorf("not forgotten after the online time limit: removed %q", r.vms.removed)
 	}
+}
+
+// staleQueue launches a VM for a small job, has its runner take a job, and
+// ticks past queueLag while GitHub still lists the job as queued. It
+// returns the job.
+func (r *rig) staleQueue() github.Job {
+	r.t.Helper()
+	j := r.queue(0, "self-hosted", "small")
+	r.tick()
+	r.gh.setRunner(r.vms.created[0].Name, "online", true)
+	for range queueLag/(5*time.Second) + 1 {
+		r.clock.advance(5 * time.Second)
+		r.tick()
+	}
+	return j
+}
+
+// While GitHub is struggling, a run's list of jobs can show a job as queued
+// long after it started. The loop asks about the job itself before
+// launching for it again, and asks only once.
+func TestNoRelaunchForJobAlreadyStarted(t *testing.T) {
+	r := newRig(t, 0, "")
+	r.gh.jobStatus = map[int64]string{jobID + 1: "in_progress"}
+	j := r.staleQueue()
+	if len(r.vms.created) != 1 {
+		t.Errorf("created %d VMs, want 1 for a job that has started", len(r.vms.created))
+	}
+	if !slices.Equal(r.gh.statusAsks, []int64{j.ID}) {
+		t.Errorf("asked about jobs %v, want %d once", r.gh.statusAsks, j.ID)
+	}
+	// Once GitHub stops listing it, including in in-progress runs, the
+	// loop forgets it.
+	r.take(j)
+	r.clock.advance(inProgressEvery)
+	r.tick()
+	if len(r.l.launchedJobs) != 0 {
+		t.Errorf("still tracking %v", r.l.launchedJobs)
+	}
+}
+
+// A job that really is still queued gets another VM, as before.
+func TestRelaunchForJobStillQueued(t *testing.T) {
+	r := newRig(t, 0, "")
+	j := r.staleQueue()
+	if len(r.vms.created) != 2 {
+		t.Errorf("created %d VMs, want a second for the queued job", len(r.vms.created))
+	}
+	if !slices.Equal(r.gh.statusAsks, []int64{j.ID}) {
+		t.Errorf("asked about jobs %v, want %d once", r.gh.statusAsks, j.ID)
+	}
+}
+
+// A queued job whose VM keeps failing to start is asked about once per
+// jobRecheck, not every tick.
+func TestJobRecheckPaced(t *testing.T) {
+	r := newRig(t, 0, "")
+	r.staleQueue()
+	r.gh.statusAsks = nil
+	r.vms.createErr = errors.New("no space")
+	r.vms.powerOff(r.vms.created[1].Name)
+	for range jobRecheck / (5 * time.Second) {
+		r.clock.advance(5 * time.Second)
+		r.tick()
+	}
+	if len(r.gh.statusAsks) != 1 {
+		t.Errorf("asked %d times in %s, want once", len(r.gh.statusAsks), jobRecheck)
+	}
+}
+
+// If GitHub can't say, the job gets a VM as it would without the check; a
+// rate limit stops the launch.
+func TestJobStatusErrors(t *testing.T) {
+	r := newRig(t, 0, "")
+	r.gh.statusErr = &github.APIError{StatusCode: 502}
+	r.staleQueue()
+	if len(r.vms.created) != 2 {
+		t.Errorf("created %d VMs after a failed check, want 2", len(r.vms.created))
+	}
+
+	r = newRig(t, 0, "")
+	r.gh.statusErr = &github.APIError{StatusCode: 403, RateLimited: true}
+	r.staleQueue()
+	if len(r.vms.created) != 1 {
+		t.Errorf("created %d VMs while rate limited, want 1", len(r.vms.created))
+	}
+}
+
+// A repo with runs GitHub couldn't list is still served from the others,
+// without a backoff.
+func TestSkippedRunsStillServed(t *testing.T) {
+	r := newRig(t, 0, "")
+	logs := r.captureLogs()
+	r.queue(0, "self-hosted", "small")
+	jobs := slices.Clone(r.gh.jobs[repo])
+	r.gh.queuedErr = nil
+	sk := &github.SkippedRunsError{RunIDs: []int64{7}, Err: &github.APIError{StatusCode: 502}}
+	r.l.gh = skippingGitHub{r.gh, jobs, sk}
+	if d := r.tick(); d != r.cfg.PollInterval.D() {
+		t.Errorf("wait %s, want the poll interval", d)
+	}
+	if len(r.vms.created) != 1 {
+		t.Errorf("created %d VMs, want 1", len(r.vms.created))
+	}
+	if !strings.Contains(logs.String(), "skipped runs") {
+		t.Errorf("skipped runs not logged:\n%s", logs)
+	}
+}
+
+// A skipped run may still have the jobs it had at the last poll of
+// in-progress runs, so their runners stay covered.
+func TestSkippedRunKeepsInProgressJobs(t *testing.T) {
+	r := newRig(t, 0, "")
+	r.l.inProgressJobs[repo] = []int64{42}
+	sk := &github.SkippedRunsError{RunIDs: []int64{7}, Err: &github.APIError{StatusCode: 502}}
+	r.l.gh = skippingGitHub{r.gh, nil, sk}
+	r.tick()
+	if !slices.Contains(r.l.inProgressJobs[repo], 42) {
+		t.Errorf("in-progress jobs %v, want 42 kept", r.l.inProgressJobs[repo])
+	}
+}
+
+// skippingGitHub returns its jobs with a *SkippedRunsError.
+type skippingGitHub struct {
+	*fakeGitHub
+	jobs []github.Job
+	err  *github.SkippedRunsError
+}
+
+func (g skippingGitHub) QueuedJobs(context.Context, string, ...string) ([]github.Job, error) {
+	return slices.Clone(g.jobs), g.err
 }
