@@ -1223,3 +1223,124 @@ func TestNoRoomWhileSpareWontDie(t *testing.T) {
 		t.Errorf("no large VM once the spare could go: %+v", r.vms.running)
 	}
 }
+
+// errMayRun is the error of a Create that left a domain that may be running.
+var errMayRun = fmt.Errorf("vm x: virsh create: signal: killed\n%w", vm.ErrMayBeRunning)
+
+// failedStart makes the next Create fail with errMayRun and returns the name
+// of the VM the loop keeps for it.
+func (r *rig) failedStart() string {
+	r.t.Helper()
+	r.vms.createErr = errMayRun
+	r.tick()
+	r.vms.createErr = nil
+	if len(r.l.machines) != 1 {
+		r.t.Fatalf("machines %v, want the failed VM kept", r.l.machines)
+	}
+	for n := range r.l.machines {
+		return n
+	}
+	return ""
+}
+
+// A VM whose start failed but may be running holds its room in the budget
+// until it is destroyed and gone, then is reaped.
+func TestFailedStartTracked(t *testing.T) {
+	r := newRig(t, 0, "")
+	logs := r.captureLogs()
+	r.queue(0, "self-hosted", "large")
+	name := r.failedStart()
+	if !strings.Contains(logs.String(), "level=WARN") || !strings.Contains(logs.String(), "vm="+name) {
+		t.Errorf("no warning naming %s:\n%s", name, logs)
+	}
+	if len(r.gh.runners[repo]) != 0 {
+		t.Errorf("runner left registered: %+v", r.gh.runners[repo])
+	}
+
+	// The domain turns up, and won't die at first. A second large VM
+	// would fit only without it.
+	r.vms.running[name] = vm.Spec{Name: name, VCPUs: 8}
+	r.vms.stuck = map[string]bool{name: true}
+	r.clock.advance(5 * time.Second)
+	r.tick()
+	if len(r.vms.created) != 0 {
+		t.Fatalf("started %+v beside a VM that may be running", r.vms.created)
+	}
+	r.vms.stuck = nil
+	r.clock.advance(5 * time.Second)
+	r.tick()
+	if !slices.Equal(r.vms.destroyed, []string{name}) {
+		t.Errorf("destroyed %q, want %s", r.vms.destroyed, name)
+	}
+	if len(r.vms.created) != 0 {
+		t.Fatalf("started %+v before the VM was seen gone", r.vms.created)
+	}
+	r.clock.advance(5 * time.Second)
+	r.tick()
+	if _, ok := r.l.machines[name]; ok || !slices.Contains(r.vms.removed, name) {
+		t.Errorf("not reaped: removed %q", r.vms.removed)
+	}
+	if len(r.vms.created) != 1 {
+		t.Errorf("no VM for the job once the room was free: %+v", r.vms.created)
+	}
+	if !strings.Contains(logs.String(), `level=INFO msg="VM gone" vm=`+name) {
+		t.Errorf("no log of %s gone:\n%s", name, logs)
+	}
+}
+
+// A VM whose start failed and never shows up is forgotten after the online
+// time limit, and its files removed.
+func TestFailedStartNeverAppears(t *testing.T) {
+	r := newRig(t, 0, "")
+	logs := r.captureLogs()
+	r.queue(0, "self-hosted", "large")
+	name := r.failedStart()
+	r.clock.advance(3 * time.Minute)
+	r.tick()
+	if _, ok := r.l.machines[name]; !ok || len(r.vms.removed) != 0 {
+		t.Fatalf("forgotten early: removed %q", r.vms.removed)
+	}
+	r.clock.advance(time.Second)
+	r.tick()
+	if _, ok := r.l.machines[name]; ok || !slices.Equal(r.vms.removed, []string{name}) {
+		t.Errorf("not forgotten: removed %q", r.vms.removed)
+	}
+	if !strings.Contains(logs.String(), "never appeared") {
+		t.Errorf("no log of forgetting %s:\n%s", name, logs)
+	}
+}
+
+// A spare whose start failed but may be running is kept too.
+func TestFailedSpareTracked(t *testing.T) {
+	r := newRig(t, 1, "")
+	r.queue(0, "self-hosted", "small")
+	r.tick()
+	n := len(r.l.machines)
+	r.vms.createErr = errMayRun
+	r.vms.powerOff(r.vms.specsOfSize(4)[0].Name)
+	r.clock.advance(5 * time.Second)
+	r.tick()
+	r.vms.createErr = nil
+	var kept []string
+	for name, m := range r.l.machines {
+		if m.state == killed && strings.Contains(name, "spare") {
+			kept = append(kept, name)
+		}
+	}
+	if len(kept) != 1 || len(r.l.machines) != n {
+		t.Errorf("machines %v, want the failed spare kept", r.l.machines)
+	}
+}
+
+// Shutdown destroys a VM whose start failed, even when it can't list VMs.
+func TestShutdownDestroysFailedStart(t *testing.T) {
+	r := newRig(t, 0, "")
+	r.queue(0, "self-hosted", "small")
+	name := r.failedStart()
+	r.vms.running[name] = vm.Spec{Name: name}
+	r.vms.listErr = errors.New("libvirt down")
+	r.l.Shutdown()
+	if !slices.Equal(r.vms.destroyed, []string{name}) {
+		t.Errorf("destroyed %q, want %s", r.vms.destroyed, name)
+	}
+}

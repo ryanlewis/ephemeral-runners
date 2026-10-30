@@ -102,6 +102,12 @@ type machine struct {
 	assigned time.Time
 	online   time.Time
 	busy     time.Time // when the loop saw its runner take a job
+
+	// mayRun is set when the VM's start failed but its domain may be
+	// running. It counts in the budget and is destroyed each tick until
+	// it has been seen running and then gone, or never shows up.
+	mayRun bool
+	seen   bool // listed running since its start failed
 }
 
 type runnerRef struct {
@@ -354,7 +360,8 @@ func rateLimitError(err error) *github.APIError {
 }
 
 // reap forgets VMs that are no longer running: it removes their files and
-// deletes their runners.
+// deletes their runners. A VM whose start failed may not be listed yet, so
+// it waits until it has been seen, or for the online time limit.
 func (l *Loop) reap(ctx context.Context) {
 	names, err := l.vms.List(ctx, l.prefix())
 	if err != nil {
@@ -363,7 +370,17 @@ func (l *Loop) reap(ctx context.Context) {
 	}
 	for _, m := range l.sorted() {
 		if slices.Contains(names, m.name) {
+			if m.mayRun {
+				m.seen = true
+			}
 			continue
+		}
+		msg := "VM gone"
+		if m.mayRun && !m.seen {
+			if l.clock.Now().Sub(m.created) <= l.cfg.Timeouts.Online.D() {
+				continue
+			}
+			msg = "VM never appeared after its start failed, forgetting it"
 		}
 		if err := l.vms.Remove(l.cfg.VM.StateDir, m.name); err != nil {
 			l.log.Warn("remove VM files", "vm", m.name, "err", err)
@@ -373,7 +390,7 @@ func (l *Loop) reap(ctx context.Context) {
 			l.deleteRunner(ctx, m.repo, m.runnerID)
 		}
 		delete(l.machines, m.name)
-		l.log.Info("VM gone", "vm", m.name, "size", m.size, "was", m.state.String(), "runner", m.runner,
+		l.log.Info(msg, "vm", m.name, "size", m.size, "was", m.state.String(), "runner", m.runner,
 			"age", l.clock.Now().Sub(m.created).Round(time.Second))
 	}
 }
@@ -505,6 +522,8 @@ func (l *Loop) timeouts(ctx context.Context, now time.Time, checked map[string]b
 	for _, m := range l.sorted() {
 		var why string
 		switch {
+		case m.mayRun:
+			why = "its start failed and it may be running"
 		case m.state == spare || m.state == killed:
 			continue
 		case now.Sub(m.assigned) > t.Job.D():
@@ -625,11 +644,12 @@ func (l *Loop) fits(size config.Size) bool {
 	return u.VCPUs+size.VCPUs <= l.cfg.Budget.VCPUs && u.MemoryGiB+size.MemoryGiB <= l.cfg.Budget.MemoryGiB
 }
 
-// used is the total size of VMs with a job; spares don't count.
+// used is the total size of VMs with a job, and of VMs whose start failed
+// that may be running; spares don't count.
 func (l *Loop) used() config.Size {
 	var u config.Size
 	for _, m := range l.machines {
-		if m.state == starting || m.state == idle || m.state == busy {
+		if m.state == starting || m.state == idle || m.state == busy || m.mayRun {
 			s := l.cfg.Sizes[m.size]
 			u.VCPUs += s.VCPUs
 			u.MemoryGiB += s.MemoryGiB
@@ -723,8 +743,7 @@ func (l *Loop) coldStart(ctx context.Context, now time.Time, j job) error {
 		return fmt.Errorf("%s: generate JIT config: %w", j.repo, err)
 	}
 	if err := l.vms.Create(ctx, l.spec(name, j.size, image, jit.EncodedConfig)); err != nil {
-		l.launchFailures++
-		l.log.Warn("start VM", "vm", name, "err", err)
+		l.startFailed("start VM", name, j.size, image, now, err)
 		l.deleteRunner(ctx, j.repo, jit.RunnerID)
 		return nil
 	}
@@ -772,13 +791,24 @@ func (l *Loop) keepSpares(ctx context.Context, now time.Time) {
 		}
 		name := l.newName("spare")
 		if err := l.vms.Create(ctx, l.spec(name, sp.Size, image, "")); err != nil {
-			l.launchFailures++
-			l.log.Warn("start spare", "vm", name, "err", err)
+			l.startFailed("start spare", name, sp.Size, image, now, err)
 			return
 		}
 		l.machines[name] = &machine{name: name, size: sp.Size, image: image, created: now, state: spare}
 		l.log.Info("started spare", "vm", name, "size", sp.Size)
 	}
+}
+
+// startFailed counts and logs a failed Create. If the VM may be running, it
+// keeps the VM as killed, so later ticks destroy it and reap it.
+func (l *Loop) startFailed(msg, name, size, image string, now time.Time, err error) {
+	l.launchFailures++
+	if !errors.Is(err, vm.ErrMayBeRunning) {
+		l.log.Warn(msg, "vm", name, "err", err)
+		return
+	}
+	l.log.Warn(msg+" failed and it may be running, will destroy it", "vm", name, "size", size, "err", err)
+	l.machines[name] = &machine{name: name, size: size, image: image, created: now, state: killed, mayRun: true}
 }
 
 func (l *Loop) spec(name, size, image, jit string) vm.Spec {
