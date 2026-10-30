@@ -9,7 +9,7 @@ Type=simple
 ExecStart=/usr/local/bin/ephemeral-runners run -config /etc/ephemeral-runners/config.json
 User=ephemeral-runners
 Group=ephemeral-runners
-SupplementaryGroups=libvirt kvm
+SupplementaryGroups=libvirt
 Restart=on-failure
 RestartSec=5s
 # On SIGTERM the service destroys its VMs and deletes their runners, which can
@@ -25,6 +25,8 @@ ProtectSystem=strict
 ReadWritePaths=/var/lib/ephemeral-runners
 ProtectHome=yes
 PrivateTmp=yes
+# A minimal /dev: virsh and qemu-img need no devices.
+PrivateDevices=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
@@ -36,6 +38,9 @@ RestrictRealtime=yes
 RestrictNamespaces=yes
 LockPersonality=yes
 SystemCallArchitectures=native
+# Only the system calls of a common service; others fail with EPERM.
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 
 [Install]
