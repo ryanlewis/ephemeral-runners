@@ -414,6 +414,15 @@ If a request for one repo fails (say the App lost access to it), the service
 logs it, skips that repo for this poll and carries on with the others. Time
 limits and spare clean-up still run.
 
+If GitHub fails to list the jobs of one run with a server error, the service
+logs it and skips only that run. It still serves the repo's other runs, and
+doesn't back off.
+
+While GitHub is struggling, it can list a job as queued for minutes after the
+job has started, or even finished. So before it launches a VM for a job it
+has launched for before, the service asks GitHub about that job directly,
+at most every 30 seconds. If the job has started, it doesn't launch.
+
 Until the service can check a repo again, it holds that repo's VMs only to
 `timeouts.job`. This stops it killing a runner that has just taken a job.
 
