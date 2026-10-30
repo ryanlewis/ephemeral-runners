@@ -68,9 +68,11 @@ const (
 	// queueLag is how long GitHub can go on listing a job as queued after
 	// a runner has taken it.
 	queueLag = time.Minute
-	// shutdownTimeout bounds the clean-up on the way out.
-	shutdownTimeout = 2 * time.Minute
 )
+
+// shutdownTimeout bounds the clean-up on the way out. It is a variable so
+// tests can shorten it.
+var shutdownTimeout = 2 * time.Minute
 
 type state int
 
@@ -269,8 +271,12 @@ func (l *Loop) Shutdown() {
 	}
 	slices.Sort(names)
 	// A runner whose VM won't die is deleted too, so it can't take a job.
+	// The destroys stop early to leave time for that, since a hung one
+	// would otherwise use up the whole limit.
+	dctx, dcancel := context.WithTimeout(ctx, shutdownTimeout*3/4)
+	defer dcancel()
 	for _, n := range names {
-		if err := l.vms.Destroy(ctx, n); err != nil {
+		if err := l.vms.Destroy(dctx, n); err != nil {
 			l.log.Warn("destroy VM on shutdown", "vm", n, "err", err)
 		} else {
 			l.log.Info("destroyed VM on shutdown", "vm", n)
