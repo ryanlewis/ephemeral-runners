@@ -1,0 +1,91 @@
+#!/usr/sbin/nft -f
+#
+# Keep runner VMs off the host and the LAN.
+#
+# Load with `sudo nft -f nftables-vm-isolation.nft`. Loading it again
+# replaces the table, and it touches no other table, so libvirt's own
+# rules (table ip/ip6 libvirt_network) are left alone.
+#
+# For traffic arriving from the VM bridge, it:
+#   - lets VMs reach the host only for DHCP and DNS (libvirt's dnsmasq);
+#   - stops VMs reaching private, link-local and CGNAT addresses through
+#     the host, while letting them reach the internet.
+#
+# It suits a libvirt NAT network such as `network:default`, whose traffic
+# the host routes. A `bridge:<name>` that switches VMs straight onto the
+# LAN is not routed, so the forward chain below never sees that traffic;
+# put such a bridge on a network that only reaches the internet instead.
+#
+# Priorities: both chains run at `filter - 10`, before libvirt's forward
+# chain (priority filter, 0) and any distribution firewall at filter. In
+# nftables a drop is final, but an accept only ends the chain it is in:
+# later base chains on the same hook still see the packet. So libvirt
+# accepting the traffic later cannot undo a drop here, and an accept here
+# does not override a drop elsewhere. Running first just gives a defined
+# order, as chains with the same priority have none.
+#
+# This is an example: check it against your network before relying on it.
+
+# The bridge the VMs are on. virbr0 is the bridge of libvirt's
+# `default` network; `virsh net-info <network>` shows a network's bridge.
+define vm_bridge = "virbr0"
+
+# Declare, then delete, so that loading the file again starts clean.
+table inet vm_isolation
+delete table inet vm_isolation
+
+table inet vm_isolation {
+	set private_v4 {
+		type ipv4_addr
+		flags interval
+		elements = {
+			10.0.0.0/8,      # RFC 1918
+			172.16.0.0/12,   # RFC 1918
+			192.168.0.0/16,  # RFC 1918
+			169.254.0.0/16,  # link-local, including cloud metadata
+			100.64.0.0/10    # CGNAT
+		}
+	}
+
+	set private_v6 {
+		type ipv6_addr
+		flags interval
+		elements = {
+			fc00::/7,   # unique local
+			fe80::/10   # link-local
+		}
+	}
+
+	# Traffic from a VM to the host itself, on any of its addresses.
+	chain input {
+		type filter hook input priority filter - 10; policy accept;
+
+		iifname != $vm_bridge accept
+		ct state established,related accept
+
+		udp dport 67 accept comment "DHCP"
+		udp dport 53 accept comment "DNS"
+		tcp dport 53 accept comment "DNS"
+
+		# Only needed if the VM network has IPv6.
+		icmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert } accept
+		udp dport 547 accept comment "DHCPv6"
+
+		counter drop
+	}
+
+	# Traffic from a VM that the host routes elsewhere.
+	chain forward {
+		type filter hook forward priority filter - 10; policy accept;
+
+		iifname != $vm_bridge accept
+		ct state established,related accept
+
+		# Site exceptions go here, before the drops. For example, an
+		# internal package mirror:
+		#   ip daddr 10.0.0.5 tcp dport 443 accept
+
+		ip daddr @private_v4 counter drop
+		ip6 daddr @private_v6 counter drop
+	}
+}
