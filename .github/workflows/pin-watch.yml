@@ -1,0 +1,129 @@
+name: pin-watch
+
+# Renovate can't bump these two pins: their hashes are published per version,
+# and a Renovate custom datasource reads a single URL. This opens one issue per
+# pin with the exact lines to paste once a newer release is at least 5 days old,
+# and closes it once the pin is current.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      rustup: ${{ steps.check.outputs.rustup }}
+      debian: ${{ steps.check.outputs.debian }}
+    steps:
+      - name: Check pins against upstream
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          min_age=$((5 * 86400))
+          fetch() { curl -fsSL --proto '=https' --tlsv1.2 --retry 3 "$@"; }
+          # newer A B: A is a later version than B.
+          newer() { [[ $1 != "$2" && $(printf '%s\n' "$1" "$2" | sort -V | tail -n1) == "$1" ]]; }
+          age() { jq -rn --arg t "$1" --arg f "$2" 'now - ($t | strptime($f) | mktime) | floor'; }
+          fail() { echo "::error::$*"; exit 1; }
+
+          gh api "repos/$GITHUB_REPOSITORY/contents/image/versions.env?ref=$GITHUB_SHA" \
+            -H 'Accept: application/vnd.github.raw' > versions.env
+          pin() { sed -n "s/^$1=//p" versions.env; }
+
+          # body NAME PREFIX HASH_KIND CURRENT NEW HASH SOURCE PUBLISHED
+          # shellcheck disable=SC2016 # literal backticks for Markdown
+          body() {
+            printf '`image/versions.env` pins %s %s. Version %s was published on %s, more than 5 days ago.\n\n' \
+              "$1" "$4" "$5" "$8"
+            printf 'Replace the two lines with:\n\n```\n%s_VERSION=%s\n%s_%s=%s\n```\n\n' "$2" "$5" "$2" "$3" "$6"
+            printf 'Hash from %s, fetched over HTTPS.\n' "$7"
+          }
+
+          # rustup: tags on rust-lang/rustup, hash and publish time from static.rust-lang.org.
+          rustup_url() { echo "https://static.rust-lang.org/rustup/archive/$1/x86_64-unknown-linux-gnu/rustup-init.sha256"; }
+          current=$(pin RUSTUP_VERSION)
+          [[ $current =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "bad RUSTUP_VERSION: $current"
+          [[ $(fetch "$(rustup_url "$current")" | awk '{print $1}') == "$(pin RUSTUP_SHA256)" ]] ||
+            fail "RUSTUP_SHA256 does not match $(rustup_url "$current")"
+          out=
+          tags=$(gh api --paginate repos/rust-lang/rustup/tags --jq '.[].name')
+          while read -r v; do
+            newer "$v" "$current" || break
+            url=$(rustup_url "$v")
+            head=$(curl -sSI --proto '=https' --tlsv1.2 --retry 3 -o /dev/null -w '%{http_code} %header{last-modified}' "$url")
+            [[ $head != 404\ * ]] || continue # tagged but not published yet
+            [[ $head == 200\ ?* ]] || fail "unexpected response for $url: $head"
+            modified=${head#200 }
+            (($(age "$modified" '%a, %d %b %Y %H:%M:%S GMT') >= min_age)) || continue
+            hash=$(fetch "$url" | awk '{print $1}')
+            [[ $hash =~ ^[0-9a-f]{64}$ ]] || fail "no SHA-256 at $url"
+            out=$(body rustup RUSTUP SHA256 "$current" "$v" "$hash" "$url" "$modified")
+            break
+          done < <(grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' <<<"$tags" | sort -Vr)
+          { echo "rustup<<END_OF_BODY"; echo "$out"; echo END_OF_BODY; } >> "$GITHUB_OUTPUT"
+
+          # Debian: dated build directories, hash from each directory's SHA512SUMS.
+          base=https://cloud.debian.org/images/cloud/trixie
+          debian_hash() {
+            fetch "$base/$1/SHA512SUMS" | awk -v f="debian-13-genericcloud-amd64-$1.qcow2" '$2 == f {print $1}'
+          }
+          current=$(pin DEBIAN_IMAGE_VERSION)
+          [[ $current =~ ^[0-9]{8}-[0-9]+$ ]] || fail "bad DEBIAN_IMAGE_VERSION: $current"
+          [[ $(debian_hash "$current") == "$(pin DEBIAN_IMAGE_SHA512)" ]] ||
+            fail "DEBIAN_IMAGE_SHA512 does not match $base/$current/SHA512SUMS"
+          out=
+          listing=$(fetch "$base/")
+          while read -r v; do
+            newer "$v" "$current" || break
+            (($(age "${v%-*}" '%Y%m%d') >= min_age)) || continue
+            hash=$(debian_hash "$v")
+            [[ $hash =~ ^[0-9a-f]{128}$ ]] || fail "no SHA-512 for $v in $base/$v/SHA512SUMS"
+            out=$(body "the Debian image" DEBIAN_IMAGE SHA512 "$current" "$v" "$hash" "$base/$v/SHA512SUMS" "${v:0:4}-${v:4:2}-${v:6:2}")
+            break
+          done < <(grep -oE 'href="[0-9]{8}-[0-9]+/"' <<<"$listing" | grep -oE '[0-9]{8}-[0-9]+' | sort -uVr)
+          { echo "debian<<END_OF_BODY"; echo "$out"; echo END_OF_BODY; } >> "$GITHUB_OUTPUT"
+
+  issues:
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Open, update or close one issue per pin
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUSTUP_BODY: ${{ needs.check.outputs.rustup }}
+          DEBIAN_BODY: ${{ needs.check.outputs.debian }}
+        run: |
+          set -euo pipefail
+          labels=$(gh label list --limit 200 --json name --jq '.[].name')
+          grep -qx dependencies <<<"$labels" ||
+            gh label create dependencies --description "Pinned dependency updates"
+          # sync TITLE BODY: an empty body means the pin is current.
+          sync() {
+            local n
+            n=$(gh issue list --state open --label dependencies --limit 100 --json number,title |
+              jq -r --arg t "$1" 'map(select(.title == $t))[0].number // empty')
+            if [[ -n $2 && -n $n ]]; then
+              gh issue edit "$n" --body "$2"
+            elif [[ -n $2 ]]; then
+              gh issue create --title "$1" --label dependencies --body "$2"
+            elif [[ -n $n ]]; then
+              gh issue close "$n" --comment "The pin is current."
+            fi
+          }
+          sync "Update the rustup pin in image/versions.env" "$RUSTUP_BODY"
+          sync "Update the Debian image pin in image/versions.env" "$DEBIAN_BODY"
