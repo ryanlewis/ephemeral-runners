@@ -268,12 +268,13 @@ func (l *Loop) Shutdown() {
 		}
 	}
 	slices.Sort(names)
+	// A runner whose VM won't die is deleted too, so it can't take a job.
 	for _, n := range names {
 		if err := l.vms.Destroy(ctx, n); err != nil {
 			l.log.Warn("destroy VM on shutdown", "vm", n, "err", err)
-			continue
+		} else {
+			l.log.Info("destroyed VM on shutdown", "vm", n)
 		}
-		l.log.Info("destroyed VM on shutdown", "vm", n)
 		if m := l.machines[n]; m != nil && m.runnerID != 0 {
 			l.deleteRunner(ctx, m.repo, m.runnerID)
 		}
