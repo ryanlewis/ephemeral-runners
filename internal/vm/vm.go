@@ -33,6 +33,12 @@ const JITConfigSize = 64 << 10
 // enough that a hung libvirtd doesn't stall the caller for good.
 const commandTimeout = 2 * time.Minute
 
+// ErrMayBeRunning is in Create's error when the domain may be running after
+// Create returns: Create could not destroy it, or virsh create was cut off,
+// after which libvirt may still start it. Create then leaves the VM's files,
+// and the caller should destroy the VM and remove them later.
+var ErrMayBeRunning = errors.New("the VM may still be running")
+
 // Spec describes a VM to create.
 type Spec struct {
 	Name      string // domain name, and the name of its directory
@@ -103,7 +109,7 @@ func checkJIT(jit string) error {
 
 // Create sets up the VM's files and starts it. If JITConfig is set, the VM
 // boots with its job config attached; otherwise it waits for Attach. On
-// failure Create removes what it made.
+// failure Create removes what it made, unless the error is ErrMayBeRunning.
 func (l *Launcher) Create(ctx context.Context, s Spec) (err error) {
 	if err := checkName(s.Name); err != nil {
 		return err
@@ -147,8 +153,9 @@ func (l *Launcher) Create(ctx context.Context, s Spec) (err error) {
 	if err := os.Mkdir(f.dir, 0o755); err != nil {
 		return fmt.Errorf("vm %s: %w", s.Name, err)
 	}
+	keep := false // the domain may be running, so its files must stay
 	defer func() {
-		if err != nil {
+		if err != nil && !keep {
 			_ = os.RemoveAll(f.dir)
 		}
 	}()
@@ -167,9 +174,16 @@ func (l *Launcher) Create(ctx context.Context, s Spec) (err error) {
 	}
 	if out, err := l.virsh(ctx, "create", f.xml); err != nil {
 		// The domain may have started before virsh failed, such as when
-		// ctx ended. Make sure it is gone before its files are.
-		_ = l.Destroy(context.WithoutCancel(ctx), s.Name)
-		return cmdError("vm "+s.Name+": virsh create", out, err)
+		// ctx ended. Make sure it is gone before its files are. If virsh
+		// was cut off, libvirt may start it after this destroy.
+		cerr := cmdError("vm "+s.Name+": virsh create", out, err)
+		derr := l.Destroy(context.WithoutCancel(ctx), s.Name)
+		cut := errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
+		if derr != nil || cut {
+			keep = true
+			return errors.Join(cerr, derr, ErrMayBeRunning)
+		}
+		return cerr
 	}
 	return nil
 }

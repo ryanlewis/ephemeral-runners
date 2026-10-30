@@ -294,6 +294,9 @@ func TestCreateFailureCleansUp(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), "it broke") {
 				t.Fatalf("error %v, want the command's output", err)
 			}
+			if errors.Is(err, ErrMayBeRunning) {
+				t.Errorf("error %v says the VM may be running", err)
+			}
 			if _, err := os.Stat(filepath.Join(s.StateDir, s.Name)); !errors.Is(err, os.ErrNotExist) {
 				t.Errorf("vm directory left behind: %v", err)
 			}
@@ -571,6 +574,60 @@ func TestCreateFailureDestroysDomain(t *testing.T) {
 	if want := "virsh -c qemu:///system destroy " + s.Name; cmds[len(cmds)-1] != want {
 		t.Errorf("last command %q, want %q", cmds[len(cmds)-1], want)
 	}
+}
+
+// If the domain can't be destroyed after virsh create fails, it may still be
+// running, so Create must keep its files and say so.
+func TestCreateFailureKeepsFilesWhenDestroyFails(t *testing.T) {
+	s := testSpec(t)
+	fr := &fakeRunner{
+		out: map[string][]byte{
+			"virsh create":  []byte("error: it broke\n"),
+			"virsh destroy": []byte("error: failed to connect to the hypervisor\n"),
+		},
+		err: map[string]error{
+			"virsh create":  errors.New("exit status 1"),
+			"virsh destroy": errors.New("exit status 1"),
+		},
+	}
+	l := &Launcher{Runner: fr}
+	err := l.Create(context.Background(), s)
+	if !errors.Is(err, ErrMayBeRunning) || !strings.Contains(err.Error(), "it broke") ||
+		!strings.Contains(err.Error(), "failed to connect to the hypervisor") {
+		t.Fatalf("error %v, want ErrMayBeRunning with the create and destroy failures", err)
+	}
+	if _, err := os.Stat(filepath.Join(s.StateDir, s.Name, "domain.xml")); err != nil {
+		t.Errorf("vm files removed: %v", err)
+	}
+}
+
+// libvirt may go on to start a domain after virsh create is killed, so a
+// destroy that finds no domain yet doesn't settle it.
+func TestCreateKilledKeepsFiles(t *testing.T) {
+	s := testSpec(t)
+	l := &Launcher{Runner: &hangingCreate{fakeRunner{
+		out: map[string][]byte{"virsh destroy": []byte("error: failed to get domain '" + s.Name + "'\n")},
+		err: map[string]error{"virsh destroy": errors.New("exit status 1")},
+	}}, timeout: 50 * time.Millisecond}
+	err := l.Create(context.Background(), s)
+	if !errors.Is(err, ErrMayBeRunning) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error %v, want ErrMayBeRunning and the deadline exceeded", err)
+	}
+	if _, err := os.Stat(filepath.Join(s.StateDir, s.Name, "domain.xml")); err != nil {
+		t.Errorf("vm files removed: %v", err)
+	}
+}
+
+// hangingCreate is a fakeRunner whose virsh create blocks until ctx ends,
+// then fails as Exec does when it kills the command.
+type hangingCreate struct{ fakeRunner }
+
+func (h *hangingCreate) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	if name == "virsh" && slices.Contains(args, "create") {
+		<-ctx.Done()
+		return nil, errors.New("signal: killed")
+	}
+	return h.fakeRunner.Run(ctx, name, args...)
 }
 
 // A hung libvirtd must not hang the loop: each command has a deadline.
