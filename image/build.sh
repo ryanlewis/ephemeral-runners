@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the runner VM image: the current Debian 13 cloud image, upgraded, with
+# Build the runner VM image: the pinned Debian 13 cloud image, upgraded, with
 # the GitHub Actions runner and whatever the site config adds. Run as root.
 #
 # Usage: build.sh [config]    (default: /etc/ephemeral-runners/image.env)
@@ -66,11 +66,16 @@ on_exit() {
 }
 trap on_exit EXIT
 
-debian=https://cloud.debian.org/images/cloud/trixie/latest
-image="debian-13-genericcloud-amd64.qcow2"
-curl -fsSL -o "$work/$image" "$debian/$image"
-curl -fsSL -o "$work/SHA512SUMS" "$debian/SHA512SUMS"
-(cd "$work" && grep " $image\$" SHA512SUMS | sha512sum -c --quiet -)
+debian=https://cloud.debian.org/images/cloud/trixie/$DEBIAN_IMAGE_VERSION
+image="debian-13-genericcloud-amd64-$DEBIAN_IMAGE_VERSION.qcow2"
+if ! curl -fsSL -o "$work/$image" "$debian/$image"; then
+  echo "can't download $debian/$image; Debian may have pruned it, so bump DEBIAN_IMAGE_VERSION and DEBIAN_IMAGE_SHA512 in $here/versions.env" >&2
+  exit 1
+fi
+if ! echo "$DEBIAN_IMAGE_SHA512  $work/$image" | sha512sum -c --quiet -; then
+  echo "$image doesn't match DEBIAN_IMAGE_SHA512 in $here/versions.env; check the pin against $debian/SHA512SUMS, and don't change it to match this download" >&2
+  exit 1
+fi
 
 curl -fsSL -o "$work/runner.tar.gz" \
   "https://github.com/actions/runner/releases/download/v$RUNNER_VERSION/actions-runner-linux-x64-$RUNNER_VERSION.tar.gz"
