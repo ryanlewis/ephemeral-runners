@@ -757,7 +757,9 @@ func TestShutdownCarriesOnPastErrors(t *testing.T) {
 		t.Errorf("destroyed %q, want %q", r.vms.destroyed, gone.name)
 	}
 	slices.Sort(r.gh.deleted)
-	if want := []int64{50, stuck.runnerID, gone.runnerID}; !slices.Equal(r.gh.deleted, want) { // runner IDs start above 100, large first
+	want := []int64{50, stuck.runnerID, gone.runnerID} // runner IDs start above 100
+	slices.Sort(want)
+	if !slices.Equal(r.gh.deleted, want) {
 		t.Errorf("deleted runners %v, want %v", r.gh.deleted, want)
 	}
 	out := logs.String()
@@ -771,6 +773,52 @@ func TestShutdownCarriesOnPastErrors(t *testing.T) {
 	}
 	if r.vms.pruned != 1 || len(r.l.machines) != 0 {
 		t.Errorf("pruned %d, machines %v", r.vms.pruned, r.l.machines)
+	}
+}
+
+// hungDestroy is a Destroy that hangs on stuck VMs until its context ends,
+// as a virsh destroy cut off by its deadline does.
+type hungDestroy struct{ *fakeVMs }
+
+func (h hungDestroy) Destroy(ctx context.Context, name string) error {
+	if h.stuck[name] {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return h.fakeVMs.Destroy(ctx, name)
+}
+
+// ctxGitHub fails calls whose context has ended, as the real client does.
+type ctxGitHub struct{ *fakeGitHub }
+
+func (g ctxGitHub) DeleteRunner(ctx context.Context, repo string, id int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return g.fakeGitHub.DeleteRunner(ctx, repo, id)
+}
+
+// A destroy that hangs for the whole shutdown time limit still leaves time
+// to delete every runner.
+func TestShutdownDeletesRunnersPastHungDestroy(t *testing.T) {
+	defer func(d time.Duration) { shutdownTimeout = d }(shutdownTimeout)
+	shutdownTimeout = 200 * time.Millisecond
+	r := newRig(t, 0, "")
+	r.queue(0, "self-hosted", "large")
+	r.queue(0, "self-hosted", "small")
+	r.tick()
+	var ids []int64
+	for _, m := range r.l.machines {
+		ids = append(ids, m.runnerID)
+		r.vms.stuck = map[string]bool{m.name: true} // one of the two
+	}
+	r.l.vms = hungDestroy{r.vms}
+	r.l.gh = ctxGitHub{r.gh}
+	r.l.Shutdown()
+	slices.Sort(ids)
+	slices.Sort(r.gh.deleted)
+	if !slices.Equal(r.gh.deleted, ids) {
+		t.Errorf("deleted runners %v, want %v", r.gh.deleted, ids)
 	}
 }
 
