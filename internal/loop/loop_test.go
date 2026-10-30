@@ -728,8 +728,9 @@ func TestShutdownWithoutVMList(t *testing.T) {
 	}
 }
 
-// Shutdown goes past a VM that won't die and keeps its runner, retries
-// earlier failed deletes, and forgets its machines even if pruning fails.
+// Shutdown goes past a VM that won't die and still deletes its runner, so
+// the runner can't take a job, retries earlier failed deletes, and forgets
+// its machines even if pruning fails.
 func TestShutdownCarriesOnPastErrors(t *testing.T) {
 	r := newRig(t, 0, "")
 	logs := r.captureLogs()
@@ -756,7 +757,7 @@ func TestShutdownCarriesOnPastErrors(t *testing.T) {
 		t.Errorf("destroyed %q, want %q", r.vms.destroyed, gone.name)
 	}
 	slices.Sort(r.gh.deleted)
-	if want := []int64{50, gone.runnerID}; !slices.Equal(r.gh.deleted, want) { // runner IDs start above 100
+	if want := []int64{50, stuck.runnerID, gone.runnerID}; !slices.Equal(r.gh.deleted, want) { // runner IDs start above 100, large first
 		t.Errorf("deleted runners %v, want %v", r.gh.deleted, want)
 	}
 	out := logs.String()
