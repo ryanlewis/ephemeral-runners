@@ -69,7 +69,7 @@ trap on_exit EXIT
 debian=https://cloud.debian.org/images/cloud/trixie/$DEBIAN_IMAGE_VERSION
 image="debian-13-genericcloud-amd64-$DEBIAN_IMAGE_VERSION.qcow2"
 if ! curl -fsSL -o "$work/$image" "$debian/$image"; then
-  echo "can't download $debian/$image; Debian may have pruned it, so bump DEBIAN_IMAGE_VERSION and DEBIAN_IMAGE_SHA512 in $here/versions.env" >&2
+  echo "can't download $debian/$image; if that's a 404, the pinned build is gone, so bump DEBIAN_IMAGE_VERSION and DEBIAN_IMAGE_SHA512 in $here/versions.env" >&2
   exit 1
 fi
 if ! echo "$DEBIAN_IMAGE_SHA512  $work/$image" | sha512sum -c --quiet -; then
