@@ -47,10 +47,25 @@ func repoPath(repo string) (string, error) {
 	return "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(name), nil
 }
 
+// SkippedRunsError lists the runs whose jobs GitHub failed to list with a
+// server error. QueuedJobs returns it with the other runs' jobs.
+type SkippedRunsError struct {
+	RunIDs []int64
+	Err    error
+}
+
+func (e *SkippedRunsError) Error() string {
+	return fmt.Sprintf("skipped runs %v: %v", e.RunIDs, e.Err)
+}
+
+func (e *SkippedRunsError) Unwrap() error { return e.Err }
+
 // QueuedJobs returns the jobs in repo that are waiting for a runner, oldest
 // first. It looks at the runs with the given statuses, by default those that
 // are queued or in progress, since an in-progress run can still have queued
-// jobs.
+// jobs. A run whose jobs GitHub fails to list with a server error is
+// skipped, and the result comes with a *SkippedRunsError, unless every run
+// failed.
 func (c *Client) QueuedJobs(ctx context.Context, repo string, runStatuses ...string) ([]Job, error) {
 	if len(runStatuses) == 0 {
 		runStatuses = []string{"queued", "in_progress"}
@@ -91,6 +106,8 @@ func (c *Client) QueuedJobs(ctx context.Context, repo string, runStatuses ...str
 		} `json:"jobs"`
 	}
 	var jobs []Job
+	var skipped []int64
+	var errs error
 	for _, id := range runIDs {
 		err := getAll(ctx, c, fmt.Sprintf("%s/actions/runs/%d/jobs?per_page=100", rp, id), func(p jobsPage) {
 			for _, j := range p.Jobs {
@@ -103,12 +120,41 @@ func (c *Client) QueuedJobs(ctx context.Context, repo string, runStatuses ...str
 		if errors.Is(err, ErrNotFound) {
 			continue
 		}
+		// One run GitHub can't list shouldn't hide the others' jobs.
+		if errors.Is(err, ErrServer) {
+			skipped = append(skipped, id)
+			errs = errors.Join(errs, err)
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}
 	}
+	if len(skipped) > 0 && len(skipped) == len(runIDs) {
+		return nil, errs
+	}
 	sort.SliceStable(jobs, func(a, b int) bool { return jobs[a].CreatedAt.Before(jobs[b].CreatedAt) })
+	if len(skipped) > 0 {
+		return jobs, &SkippedRunsError{RunIDs: skipped, Err: errs}
+	}
 	return jobs, nil
+}
+
+// JobStatus returns a job's status, such as queued, in_progress or
+// completed. Unlike a run's list of jobs, it is up to date while GitHub is
+// struggling.
+func (c *Client) JobStatus(ctx context.Context, repo string, id int64) (string, error) {
+	rp, err := repoPath(repo)
+	if err != nil {
+		return "", err
+	}
+	var out struct {
+		Status string `json:"status"`
+	}
+	if _, err := c.do(ctx, http.MethodGet, fmt.Sprintf("%s/actions/jobs/%d", rp, id), nil, &out); err != nil {
+		return "", err
+	}
+	return out.Status, nil
 }
 
 // GenerateJITConfig registers a single-use runner in repo, in the default

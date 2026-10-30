@@ -19,6 +19,7 @@ func TestBadRepoEveryMethod(t *testing.T) {
 		"GetRunner":         func() error { _, err := c.GetRunner(ctx, bad, 1); return err },
 		"ListRunners":       func() error { _, err := c.ListRunners(ctx, bad); return err },
 		"DeleteRunner":      func() error { return c.DeleteRunner(ctx, bad, 1) },
+		"JobStatus":         func() error { _, err := c.JobStatus(ctx, bad, 1); return err },
 	}
 	for name, call := range calls {
 		if err := call(); err == nil || !strings.Contains(err.Error(), "not in owner/name form") {
@@ -131,5 +132,42 @@ func TestQueuedJobsNone(t *testing.T) {
 	jobs, err := newClient(t, srv, nil).QueuedJobs(context.Background(), "example-org/example-repo")
 	if err != nil || jobs != nil {
 		t.Errorf("jobs = %v, err = %v", jobs, err)
+	}
+}
+
+// A run whose jobs GitHub fails to list with a server error is skipped, and
+// the other runs' jobs come back with a *SkippedRunsError.
+func TestQueuedJobsSkipsFailingRun(t *testing.T) {
+	const runs = "GET /repos/example-org/example-repo/actions/runs"
+	f, srv := newFake(t, time.Now())
+	f.HandleFunc(runs, func(w http.ResponseWriter, r *http.Request) {
+		writeBody(t, w, `{"workflow_runs":[{"id":100},{"id":200}]}`)
+	})
+	f.HandleFunc(runs+"/100/jobs", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusBadGateway) })
+	f.HandleFunc(runs+"/200/jobs", func(w http.ResponseWriter, r *http.Request) {
+		writeBody(t, w, `{"jobs":[{"id":3,"run_id":200,"name":"a","status":"queued","labels":["self-hosted"],"created_at":"2026-01-01T00:01:00Z"}]}`)
+	})
+	jobs, err := newClient(t, srv, nil).QueuedJobs(context.Background(), "example-org/example-repo")
+	var skipped *SkippedRunsError
+	if !errors.As(err, &skipped) || len(skipped.RunIDs) != 1 || skipped.RunIDs[0] != 100 || !errors.Is(err, ErrServer) {
+		t.Fatalf("err = %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].ID != 3 {
+		t.Errorf("jobs = %+v", jobs)
+	}
+}
+
+func TestJobStatus(t *testing.T) {
+	f, srv := newFake(t, time.Now())
+	f.HandleFunc("GET /repos/example-org/example-repo/actions/jobs/7", func(w http.ResponseWriter, r *http.Request) {
+		writeBody(t, w, `{"id":7,"status":"in_progress"}`)
+	})
+	c := newClient(t, srv, nil)
+	status, err := c.JobStatus(context.Background(), "example-org/example-repo", 7)
+	if err != nil || status != "in_progress" {
+		t.Errorf("status = %q, err = %v", status, err)
+	}
+	if _, err := c.JobStatus(context.Background(), "example-org/example-repo", 8); !errors.Is(err, ErrNotFound) {
+		t.Errorf("missing job: err = %v", err)
 	}
 }
