@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -64,11 +65,44 @@ type Client struct {
 	notModified atomic.Int64
 }
 
+// SecureScheme reports whether u may carry credentials: https, or http to a
+// loopback host, where nothing leaves the machine.
+func SecureScheme(u *url.URL) bool {
+	if u.Scheme == "https" {
+		return true
+	}
+	if u.Scheme != "http" {
+		return false
+	}
+	h := u.Hostname()
+	if strings.EqualFold(h, "localhost") {
+		return true
+	}
+	ip, err := netip.ParseAddr(h)
+	return err == nil && ip.IsLoopback()
+}
+
+// refuseInsecureRedirect stops a redirect from https down to plain http, which
+// would send the token in cleartext: net/http keeps Authorization on a
+// same-host redirect whatever the scheme.
+func refuseInsecureRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	if !SecureScheme(req.URL) {
+		return fmt.Errorf("refusing redirect to %s: requires https", req.URL.Redacted())
+	}
+	return nil
+}
+
 // New returns a Client.
 func New(o Options) (*Client, error) {
 	u, err := url.Parse(o.BaseURL)
 	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
 		return nil, fmt.Errorf("base URL %q is not an http(s) URL", o.BaseURL)
+	}
+	if !SecureScheme(u) {
+		return nil, fmt.Errorf("base URL %q requires https (plain http is allowed only for loopback hosts)", o.BaseURL)
 	}
 	if o.AppID <= 0 || o.InstallationID <= 0 {
 		return nil, errors.New("app ID and installation ID are required")
@@ -85,7 +119,7 @@ func New(o Options) (*Client, error) {
 		now:            o.Now,
 	}
 	if c.http == nil {
-		c.http = &http.Client{Timeout: 30 * time.Second}
+		c.http = &http.Client{Timeout: 30 * time.Second, CheckRedirect: refuseInsecureRedirect}
 	}
 	if c.now == nil {
 		c.now = time.Now

@@ -13,6 +13,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/ryanlewis/ephemeral-runners/internal/github"
 )
 
 // Config is the whole configuration file.
@@ -201,6 +203,8 @@ func (c *Config) checkGitHub(bad badFunc) {
 	}
 	if u, err := url.Parse(c.GitHub.APIURL); err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
 		bad("github.api_url %q is not an http(s) URL", c.GitHub.APIURL)
+	} else if !github.SecureScheme(u) {
+		bad("github.api_url %q requires https (plain http is allowed only for loopback hosts)", c.GitHub.APIURL)
 	}
 }
 

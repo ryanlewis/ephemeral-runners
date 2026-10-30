@@ -25,6 +25,9 @@ func TestNewRejectsBadOptions(t *testing.T) {
 		{"ftp scheme", func(o *Options) { o.BaseURL = "ftp://api.example.test" }, "not an http(s) URL"},
 		{"no host", func(o *Options) { o.BaseURL = "https://" }, "not an http(s) URL"},
 		{"unparsable", func(o *Options) { o.BaseURL = "http://[::1" }, "not an http(s) URL"},
+		{"plain http", func(o *Options) { o.BaseURL = "http://github.example.com" }, "requires https"},
+		{"plain http, private IP", func(o *Options) { o.BaseURL = "http://10.0.0.1:8080/api/v3" }, "requires https"},
+		{"plain http, localhost lookalike", func(o *Options) { o.BaseURL = "http://localhost.example.com" }, "requires https"},
 		{"zero app ID", func(o *Options) { o.AppID = 0 }, "app ID and installation ID"},
 		{"negative app ID", func(o *Options) { o.AppID = -1 }, "app ID and installation ID"},
 		{"zero installation ID", func(o *Options) { o.InstallationID = 0 }, "app ID and installation ID"},
@@ -39,6 +42,43 @@ func TestNewRejectsBadOptions(t *testing.T) {
 				t.Fatalf("New = %v, %v; want error containing %q", c, err, tt.want)
 			}
 		})
+	}
+}
+
+func TestNewAcceptsLoopbackHTTP(t *testing.T) {
+	for _, base := range []string{
+		"http://127.0.0.1:8080", "http://127.1.2.3", "http://localhost:9", "http://LOCALHOST", "http://[::1]:8080",
+		"https://api.example.test",
+	} {
+		if _, err := New(Options{BaseURL: base, AppID: 1, InstallationID: 2, Key: testKey}); err != nil {
+			t.Errorf("New(%q) = %v, want nil", base, err)
+		}
+	}
+}
+
+func TestDefaultClientRefusesInsecureRedirect(t *testing.T) {
+	c, err := New(Options{BaseURL: "https://api.example.test", AppID: 1, InstallationID: 2, Key: testKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := c.http.CheckRedirect
+	req := func(u string) *http.Request {
+		r, err := http.NewRequest(http.MethodGet, u, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	if err := check(req("http://api.example.test/x"), nil); err == nil || !strings.Contains(err.Error(), "requires https") {
+		t.Errorf("redirect to plain http = %v, want requires https error", err)
+	}
+	for _, ok := range []string{"https://api.example.test/x", "http://127.0.0.1:8080/x"} {
+		if err := check(req(ok), nil); err != nil {
+			t.Errorf("redirect to %s = %v, want nil", ok, err)
+		}
+	}
+	if err := check(req("https://api.example.test/x"), make([]*http.Request, 10)); err == nil {
+		t.Error("11th redirect allowed, want error")
 	}
 }
 

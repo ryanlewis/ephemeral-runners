@@ -137,6 +137,8 @@ func TestValidateErrors(t *testing.T) {
 	}{
 		{"api url not http", `"/k.pem"`, `"/k.pem", "api_url": "ftp://api.github.com"`, `github.api_url "ftp://api.github.com" is not an http(s) URL`},
 		{"api url no host", `"/k.pem"`, `"/k.pem", "api_url": "https://"`, `github.api_url "https://" is not an http(s) URL`},
+		{"api url plain http", `"/k.pem"`, `"/k.pem", "api_url": "http://github.example.com"`, `github.api_url "http://github.example.com" requires https (plain http is allowed only for loopback hosts)`},
+		{"api url plain http private IP", `"/k.pem"`, `"/k.pem", "api_url": "http://10.0.0.1:8080"`, `github.api_url "http://10.0.0.1:8080" requires https (plain http is allowed only for loopback hosts)`},
 		{"api url unparsable", `"/k.pem"`, `"/k.pem", "api_url": "http://[::1"`, `github.api_url "http://[::1" is not an http(s) URL`},
 		{"repo twice", `["example-org/example-repo"]`, `["example-org/example-repo", "Example-Org/Example-Repo"]`, `repo "Example-Org/Example-Repo" is listed twice`},
 		{"blank label", `"example"]`, `"example", " "]`, "labels has an empty label"},
@@ -189,7 +191,10 @@ func TestValidateAccepts(t *testing.T) {
 	tests := []struct {
 		name, from, to string
 	}{
-		{"http api url", `"/k.pem"`, `"/k.pem", "api_url": "http://ghe.example/api/v3"`},
+		{"https api url", `"/k.pem"`, `"/k.pem", "api_url": "https://ghe.example/api/v3"`},
+		{"http api url on 127.0.0.1", `"/k.pem"`, `"/k.pem", "api_url": "http://127.0.0.1:8080"`},
+		{"http api url on localhost", `"/k.pem"`, `"/k.pem", "api_url": "http://localhost:8080/api/v3"`},
+		{"http api url on ::1", `"/k.pem"`, `"/k.pem", "api_url": "http://[::1]:8080"`},
 		{"size equal to budget", `"name_prefix"`, `"budget": {"vcpus": 8, "memory_gib": 8}, "name_prefix"`},
 		{"no spares ignores spare size", `"name_prefix"`, `"spares": {"count": 0, "size": "huge", "idle_after": "0s"}, "name_prefix"`},
 		{"one-character prefix", `"name_prefix": "example"`, `"name_prefix": "x"`},
