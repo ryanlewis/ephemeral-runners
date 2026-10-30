@@ -584,7 +584,8 @@ func TestShutdown(t *testing.T) {
 	}
 }
 
-// Startup stops at the first VM error, before it touches any runner.
+// Startup stops at an error listing VMs or removing their files, before it
+// touches any runner.
 func TestStartupStopsOnVMError(t *testing.T) {
 	boom := errors.New("boom")
 	for _, tc := range []struct {
@@ -595,8 +596,6 @@ func TestStartupStopsOnVMError(t *testing.T) {
 		pruned    int
 	}{
 		{"list", func(f *fakeVMs) { f.listErr = boom }, "list VMs: boom", nil, 0},
-		{"destroy", func(f *fakeVMs) { f.stuck = map[string]bool{"ex-spare-0002": true} },
-			"destroy leftover VM ex-spare-0002: ex-spare-0002 will not die", []string{"ex-spare-0001"}, 0},
 		{"prune", func(f *fakeVMs) { f.pruneErr = boom }, "remove leftover VM files: boom",
 			[]string{"ex-spare-0001", "ex-spare-0002", "ex-spare-0003"}, 1},
 	} {
@@ -611,7 +610,7 @@ func TestStartupStopsOnVMError(t *testing.T) {
 			if err == nil || err.Error() != tc.want {
 				t.Fatalf("err %v, want %q", err, tc.want)
 			}
-			if tc.name != "destroy" && !errors.Is(err, boom) {
+			if !errors.Is(err, boom) {
 				t.Errorf("%v does not wrap the cause", err)
 			}
 			if !slices.Equal(r.vms.destroyed, tc.destroyed) {
@@ -624,6 +623,69 @@ func TestStartupStopsOnVMError(t *testing.T) {
 				t.Errorf("deleted runners %v", r.gh.deleted)
 			}
 		})
+	}
+}
+
+// A leftover VM that won't die doesn't stop Startup. It is kept like a VM
+// whose start failed: it holds its room in the budget, is destroyed again
+// each tick, and is reaped once gone.
+func TestStartupKeepsWedgedVM(t *testing.T) {
+	const wedged = "ex-example-repo-large-0002"
+	r := newRig(t, 0, "")
+	logs := r.captureLogs()
+	for _, n := range []string{"ex-spare-0001", wedged, "ex-spare-0003"} {
+		r.vms.running[n] = vm.Spec{Name: n}
+	}
+	r.vms.stuck = map[string]bool{wedged: true}
+	r.gh.runners[repo] = []github.Runner{{ID: 1, Name: "ex-spare-0001", Status: "offline"}}
+	if err := r.l.Startup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"ex-spare-0001", "ex-spare-0003"}; !slices.Equal(r.vms.destroyed, want) {
+		t.Errorf("destroyed %q, want %q", r.vms.destroyed, want)
+	}
+	if r.vms.pruned != 1 || !slices.Equal(r.gh.deleted, []int64{1}) {
+		t.Errorf("pruned %d, deleted runners %v", r.vms.pruned, r.gh.deleted)
+	}
+	if n := strings.Count(logs.String(), "level=WARN"); n != 1 || !strings.Contains(logs.String(), "vm="+wedged) {
+		t.Errorf("want one warning naming %s:\n%s", wedged, logs)
+	}
+
+	// A large job would fit only without it.
+	r.queue(0, "self-hosted", "large")
+	r.tick()
+	if len(r.vms.created) != 0 {
+		t.Fatalf("started %+v beside a VM that won't die", r.vms.created)
+	}
+	r.vms.stuck = nil
+	r.clock.advance(5 * time.Second)
+	r.tick()
+	if !slices.Contains(r.vms.destroyed, wedged) {
+		t.Errorf("not destroyed again: destroyed %q", r.vms.destroyed)
+	}
+	r.clock.advance(5 * time.Second)
+	r.tick()
+	if _, ok := r.l.machines[wedged]; ok || !slices.Contains(r.vms.removed, wedged) {
+		t.Errorf("not reaped: removed %q", r.vms.removed)
+	}
+	if len(r.vms.created) != 1 {
+		t.Errorf("no VM for the job once the room was free: %+v", r.vms.created)
+	}
+}
+
+// A leftover VM's size comes from its name. One whose name has no size,
+// such as a spare, counts as the largest size.
+func TestLeftoverSize(t *testing.T) {
+	r := newRig(t, 0, "")
+	for name, want := range map[string]string{
+		"ex-example-repo-small-0001":  "small",
+		"ex-example-repo-medium-0002": "medium",
+		"ex-spare-0003":               "large",
+		"ex-odd":                      "large",
+	} {
+		if got := r.l.leftoverSize(name); got != want {
+			t.Errorf("%s: size %q, want %q", name, got, want)
+		}
 	}
 }
 
