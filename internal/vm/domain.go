@@ -243,6 +243,11 @@ func domainXML(s Spec, n nic) ([]byte, error) {
 				Target: diskTarget{Dev: "vda", Bus: "virtio"},
 			}},
 			Interfaces: []nic{n},
+			// libvirt writes the file through virtlogd when qemu.conf has
+			// stdio_handler = "logd", the default, and virtlogd caps it
+			// (virtlogd.conf max_size and max_backups). A host that sets
+			// stdio_handler = "file" loses the cap, and a guest can fill
+			// the disk through its serial console.
 			Serials: []serial{{
 				Type:   "file",
 				Source: serialSource{Path: f.serial},
