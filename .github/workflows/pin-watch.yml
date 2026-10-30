@@ -57,7 +57,9 @@ jobs:
           [[ $(fetch "$(rustup_url "$current")" | awk '{print $1}') == "$(pin RUSTUP_SHA256)" ]] ||
             fail "RUSTUP_SHA256 does not match $(rustup_url "$current")"
           out=
-          tags=$(gh api --paginate repos/rust-lang/rustup/tags --jq '.[].name')
+          tags=$(gh api --paginate repos/rust-lang/rustup/tags --jq '.[].name' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -Vr) || true
+          # A failed fetch or a reshaped list must not read as "current".
+          grep -qxF "$current" <<<"$tags" || fail "RUSTUP_VERSION $current is not among the rust-lang/rustup tags"
           while read -r v; do
             newer "$v" "$current" || break
             url=$(rustup_url "$v")
@@ -70,7 +72,7 @@ jobs:
             [[ $hash =~ ^[0-9a-f]{64}$ ]] || fail "no SHA-256 at $url"
             out=$(body rustup RUSTUP SHA256 "$current" "$v" "$hash" "$url" "$modified")
             break
-          done < <(grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' <<<"$tags" | sort -Vr)
+          done <<<"$tags"
           { echo "rustup<<END_OF_BODY"; echo "$out"; echo END_OF_BODY; } >> "$GITHUB_OUTPUT"
 
           # Debian: dated build directories, hash from each directory's SHA512SUMS.
@@ -83,7 +85,8 @@ jobs:
           [[ $(debian_hash "$current") == "$(pin DEBIAN_IMAGE_SHA512)" ]] ||
             fail "DEBIAN_IMAGE_SHA512 does not match $base/$current/SHA512SUMS"
           out=
-          listing=$(fetch "$base/")
+          builds=$(fetch "$base/" | grep -oE 'href="[0-9]{8}-[0-9]+/"' | grep -oE '[0-9]{8}-[0-9]+' | sort -uVr) || true
+          grep -qxF "$current" <<<"$builds" || fail "DEBIAN_IMAGE_VERSION $current is not listed under $base/"
           while read -r v; do
             newer "$v" "$current" || break
             (($(age "${v%-*}" '%Y%m%d') >= min_age)) || continue
@@ -91,7 +94,7 @@ jobs:
             [[ $hash =~ ^[0-9a-f]{128}$ ]] || fail "no SHA-512 for $v in $base/$v/SHA512SUMS"
             out=$(body "the Debian image" DEBIAN_IMAGE SHA512 "$current" "$v" "$hash" "$base/$v/SHA512SUMS" "${v:0:4}-${v:4:2}-${v:6:2}")
             break
-          done < <(grep -oE 'href="[0-9]{8}-[0-9]+/"' <<<"$listing" | grep -oE '[0-9]{8}-[0-9]+' | sort -uVr)
+          done <<<"$builds"
           { echo "debian<<END_OF_BODY"; echo "$out"; echo END_OF_BODY; } >> "$GITHUB_OUTPUT"
 
   issues:
