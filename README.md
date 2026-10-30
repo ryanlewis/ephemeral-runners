@@ -66,8 +66,8 @@ flowchart LR
 4. The service deletes the powered-off VM's files and its runner, and keeps
    the configured number of spares booted while jobs keep arriving.
 
-Jobs start oldest first while the VMs running jobs fit in a CPU and memory
-`budget`. More detail is in [What the service does](#what-the-service-does).
+Jobs start oldest first while all of its VMs, spares included, fit in a CPU
+and memory `budget`; spares make way for jobs. More detail is in [What the service does](#what-the-service-does).
 
 ## Install
 
@@ -183,7 +183,7 @@ every field.
 | `poll_interval` | `5s` | How often to look for queued jobs. |
 | `sizes` | `small` 2/2, `medium` 4/4, `large` 8/8 | VM shapes: `vcpus` and `memory_gib`. Names are letters, digits, `.`, `_` and `-`. |
 | `default_size` | `medium` | Size for a job with no size label. |
-| `budget` | 24 vCPU, 28 GiB | Total size of the VMs that have jobs. |
+| `budget` | 24 vCPU, 28 GiB | Total size of all VMs, spares included. Spares are destroyed to make room for jobs. |
 | `spares.size`, `spares.count` | `medium`, 4 | Warm spares kept booted. |
 | `spares.idle_after` | `20m` | Destroy spares after this long with no jobs. |
 | `vm.image` | `/var/lib/ephemeral-runners/images/current.qcow2` | Base image. |
@@ -298,8 +298,8 @@ Every `poll_interval`, the service:
    `<name_prefix>-<repo>-<size>-<4 hex>` with `labels` and the size, and gives
    its config to a VM of that size: a warm spare if the job is of the spare
    size and one is free, otherwise a new VM. Jobs start oldest first while the
-   sizes of the VMs that have jobs fit in the `budget`; spares are destroyed if
-   a new VM needs their room;
+   sizes of all its VMs, spares included, fit in the `budget`; spares are
+   destroyed if a new VM needs their room;
 5. while jobs have been seen within `spares.idle_after`, keeps `spares.count`
    spares booted (`<name_prefix>-spare-<4 hex>`) and replaces any that booted
    from an older image. After that, it destroys them;
