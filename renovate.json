@@ -1,4 +1,44 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["github>ryanlewis/renovate-config"]
+  "extends": ["github>ryanlewis/renovate-config"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "golangci-lint version passed to golangci-lint-action in CI.",
+      "managerFilePatterns": ["/^\\.github/workflows/ci\\.yml$/"],
+      "matchStrings": [
+        "uses: golangci/golangci-lint-action@\\S+.*\\n\\s+with:\\n\\s+version: (?<currentValue>v\\S+)"
+      ],
+      "depNameTemplate": "golangci/golangci-lint",
+      "datasourceTemplate": "github-releases"
+    },
+    {
+      "customType": "regex",
+      "description": "Actions runner tarball for the image. The version and its SHA-256 update together; the hash comes from the release asset's digest.",
+      "managerFilePatterns": ["/^image/versions\\.env$/"],
+      "matchStrings": [
+        "RUNNER_VERSION=(?<currentValue>\\S+)\\nRUNNER_SHA256=(?<currentDigest>[0-9a-f]{64})"
+      ],
+      "depNameTemplate": "actions/runner",
+      "datasourceTemplate": "custom.actions-runner",
+      "versioningTemplate": "semver"
+    }
+  ],
+  "customDatasources": {
+    "actions-runner": {
+      "description": "Stable actions/runner releases, each with the SHA-256 GitHub records for its linux-x64 tarball. Releases without that asset digest are left out, so a version never lands with a stale hash.",
+      "defaultRegistryUrlTemplate": "https://api.github.com/repos/actions/runner/releases?per_page=100",
+      "format": "json",
+      "transformTemplates": [
+        "{ \"releases\": [$[draft = false and prerelease = false].($v := $substringAfter(tag_name, \"v\"); $d := assets[name = \"actions-runner-linux-x64-\" & $v & \".tar.gz\"].digest; $type($d) = \"string\" and $contains($d, /^sha256:[0-9a-f]{64}$/) ? { \"version\": $v, \"releaseTimestamp\": published_at, \"digest\": $substringAfter($d, \"sha256:\"), \"changelogUrl\": html_url })], \"sourceUrl\": \"https://github.com/actions/runner\" }"
+      ]
+    }
+  },
+  "packageRules": [
+    {
+      "description": "Pinned image and tool versions always get a human.",
+      "matchDepNames": ["actions/runner", "golangci/golangci-lint"],
+      "automerge": false
+    }
+  ]
 }
