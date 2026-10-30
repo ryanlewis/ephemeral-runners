@@ -1344,3 +1344,39 @@ func TestShutdownDestroysFailedStart(t *testing.T) {
 		t.Errorf("destroyed %q, want %s", r.vms.destroyed, name)
 	}
 }
+
+// slowFailedCreate is a Create that takes d, as virsh create cut off by its
+// deadline does, then fails leaving a VM that may be running.
+type slowFailedCreate struct {
+	*fakeVMs
+	clock *fakeClock
+	d     time.Duration
+}
+
+func (s slowFailedCreate) Create(context.Context, vm.Spec) error {
+	s.clock.advance(s.d)
+	return errMayRun
+}
+
+// The wait for a VM whose start failed counts from when Create returned, not
+// from the start of the tick that called it.
+func TestFailedStartWaitsFromFailure(t *testing.T) {
+	r := newRig(t, 0, "")
+	r.queue(0, "self-hosted", "large")
+	r.l.vms = slowFailedCreate{r.vms, r.clock, 4 * time.Minute}
+	r.tick()
+	r.l.vms = r.vms
+	if len(r.l.machines) != 1 {
+		t.Fatalf("machines %v, want the failed VM kept", r.l.machines)
+	}
+	r.clock.advance(5 * time.Second)
+	r.tick()
+	if len(r.l.machines) != 1 || len(r.vms.removed) != 0 {
+		t.Fatalf("forgotten 5s after its start failed: removed %q", r.vms.removed)
+	}
+	r.clock.advance(3 * time.Minute)
+	r.tick()
+	if len(r.vms.removed) != 1 {
+		t.Errorf("not forgotten after the online time limit: removed %q", r.vms.removed)
+	}
+}
