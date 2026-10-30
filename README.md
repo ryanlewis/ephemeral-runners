@@ -83,10 +83,41 @@ sudo apt install libvirt-daemon-system libvirt-clients qemu-system-x86 \
   qemu-utils ovmf libguestfs-tools golang
 ```
 
-Each VM's network port is isolated, so VMs on the same bridge or libvirt
-network can't reach each other. Keeping them away from the host and your LAN
-is up to the network: for example, a bridge with no host address on a network
-that only routes to the internet.
+**Keep VMs off the host and your LAN.** Each VM's network port is isolated,
+so VMs on the same bridge or libvirt network can't reach each other. They can
+still reach the host and your LAN: on the default `network:default`, libvirt
+routes VM traffic through the host, so a job can connect to anything the host
+listens on (SSH, exporters) and to every device on your network.
+[`examples/nftables-vm-isolation.nft`](examples/nftables-vm-isolation.nft)
+blocks that. It lets VMs reach the host only for DHCP and DNS, and blocks
+traffic to private, link-local and CGNAT addresses. It adds its own table and
+leaves libvirt's alone. Set `vm_bridge` at the top if your network's bridge is
+not `virbr0`, add any exceptions you need, then load it:
+
+```sh
+sudo nft -f examples/nftables-vm-isolation.nft
+```
+
+To load it at boot on Debian, copy it into a new `/etc/nftables.d/`, add
+`include "/etc/nftables.d/*.nft"` to the end of `/etc/nftables.conf`, and run
+`sudo systemctl enable nftables`. Debian's `nftables.conf` starts with
+`flush ruleset`, so reloading `nftables.service` while libvirt is running
+also removes libvirt's rules; reload just this file with `nft -f` instead.
+
+To check it, from a VM, `curl` the host's bridge address (`192.168.122.1` on
+`network:default`) and a LAN address: both should fail. `curl
+https://github.com` should work. The example is for a routed network; a
+`bridge:<name>` that puts VMs straight onto your LAN bypasses it, so put such
+a bridge on a network that only reaches the internet.
+
+**Give VM disks their own filesystem.** Each VM's overlay in `vm.state_dir`
+can grow to the image's disk size (`DISK_SIZE`, 40G by default), and the
+budget doesn't count disk. So a job can fill the filesystem `vm.state_dir` is
+on. Mount a filesystem or LV of its own at `/var/lib/ephemeral-runners/vms`,
+sized for the worst case: (`spares.count` + the most jobs the budget allows
+at once) × `DISK_SIZE`. With the defaults that is (4 + 12 small jobs) × 40G =
+640G; most jobs use far less. After mounting it, run `sudo
+systemd-tmpfiles --create` to give it the right owner.
 
 **1. Install the program.** From a checkout, build the binary as a normal user
 (or cross-compile it elsewhere), then install it as root:
@@ -349,9 +380,18 @@ Renovate keeps dependencies and the pinned actions current.
 
 A job can run any code it likes inside its VM, with root through `sudo`. The
 VM is the boundary. Jobs can't reach each other and nothing in a VM survives
-its job, but each VM can reach whatever its network can reach. The GitHub App
+its job, but each VM can reach whatever its network can reach (see
+[Install](#install) for keeping VMs off the host and your LAN). The GitHub App
 key stays on the host, readable only by the service user; a VM only ever gets
 the JIT config for its own runner.
+
+**Check libvirt's security driver.** Every VM's QEMU process runs as the same
+user, so only libvirt's security driver keeps one VM's QEMU away from another
+VM's files. On the host, `virsh capabilities | grep -A2 secmodel` should list
+`apparmor` (or `selinux`). Also check that `grep stdio_handler
+/etc/libvirt/qemu.conf` shows nothing or `"logd"`: then virtlogd writes each
+VM's serial log and caps its size. If it shows `"file"`, a job can fill the
+disk through its serial console.
 
 **Be careful with public repos.** On a public repo anyone can open a pull
 request from a fork, and its workflow can ask for your runners' labels. GitHub
