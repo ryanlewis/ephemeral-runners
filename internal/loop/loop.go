@@ -18,7 +18,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"maps"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -107,10 +106,11 @@ type machine struct {
 	busy     time.Time // when the loop saw its runner take a job
 
 	// mayRun is set when the VM's start failed but its domain may be
-	// running, or when Startup could not destroy it. It counts in the budget and is destroyed each tick until
-	// it has been seen running and then gone, or never shows up.
+	// running, or when Startup could not destroy it. It counts in the
+	// budget and is destroyed each tick until it has been seen running and
+	// then gone, or never shows up.
 	mayRun bool
-	seen   bool // listed running since its start failed
+	seen   bool // listed running since its start failed, or at Startup
 }
 
 type runnerRef struct {
@@ -224,7 +224,7 @@ func (l *Loop) Startup(ctx context.Context) error {
 		// Prune leaves its files while it is listed.
 		if err := l.vms.Destroy(ctx, n); err != nil {
 			size := l.leftoverSize(n)
-			l.log.Warn("leftover VM won't destroy, will keep destroying it", "vm", n, "size", size, "err", err)
+			l.log.Warn("leftover VM won't destroy, will keep destroying it", "vm", n, "size", cmp.Or(size, "unknown"), "err", err)
 			l.machines[n] = &machine{name: n, size: size, created: l.clock.Now(), state: killed, mayRun: true, seen: true}
 			continue
 		}
@@ -262,24 +262,21 @@ func (l *Loop) Startup(ctx context.Context) error {
 	return nil
 }
 
-// leftoverSize returns a leftover VM's size from its name,
-// <prefix>-<repo>-<size>-<hex>. A name with no size, such as a spare's,
-// gets the largest, so the budget doesn't count the VM short.
+// leftoverSize returns the size in a leftover VM's name,
+// <prefix>-<repo>-<size>-<hex>, or "" if it has none, as a spare's name.
+// Size names can hold hyphens, so the longest that fits wins.
 func (l *Loop) leftoverSize(name string) string {
-	parts := strings.Split(name, "-")
-	if len(parts) >= 2 {
-		if _, ok := l.cfg.Sizes[parts[len(parts)-2]]; ok {
-			return parts[len(parts)-2]
+	i := strings.LastIndex(name, "-")
+	if i < 0 {
+		return ""
+	}
+	var size string
+	for _, n := range l.cfg.SizeNames() {
+		if strings.HasSuffix(name[:i], "-"+n) && len(n) > len(size) {
+			size = n
 		}
 	}
-	var largest string
-	for _, n := range slices.Sorted(maps.Keys(l.cfg.Sizes)) {
-		s, big := l.cfg.Sizes[n], l.cfg.Sizes[largest]
-		if largest == "" || s.MemoryGiB > big.MemoryGiB || s.MemoryGiB == big.MemoryGiB && s.VCPUs > big.VCPUs {
-			largest = n
-		}
-	}
-	return largest
+	return size
 }
 
 // Shutdown destroys the loop's VMs, deletes their runners and removes
@@ -685,12 +682,25 @@ func (l *Loop) used() config.Size {
 	var u config.Size
 	for _, m := range l.machines {
 		if m.state == starting || m.state == idle || m.state == busy || m.mayRun {
-			s := l.cfg.Sizes[m.size]
+			s := l.room(m.size)
 			u.VCPUs += s.VCPUs
 			u.MemoryGiB += s.MemoryGiB
 		}
 	}
 	return u
+}
+
+// room returns a size's vCPUs and memory. A leftover VM of no known size
+// gets the most of each that any size has.
+func (l *Loop) room(size string) config.Size {
+	if s, ok := l.cfg.Sizes[size]; ok {
+		return s
+	}
+	var r config.Size
+	for _, s := range l.cfg.Sizes {
+		r.VCPUs, r.MemoryGiB = max(r.VCPUs, s.VCPUs), max(r.MemoryGiB, s.MemoryGiB)
+	}
+	return r
 }
 
 // spares returns the spares, oldest first.
