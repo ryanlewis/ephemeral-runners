@@ -743,7 +743,7 @@ func (l *Loop) coldStart(ctx context.Context, now time.Time, j job) error {
 		return fmt.Errorf("%s: generate JIT config: %w", j.repo, err)
 	}
 	if err := l.vms.Create(ctx, l.spec(name, j.size, image, jit.EncodedConfig)); err != nil {
-		l.startFailed("start VM", name, j.size, image, now, err)
+		l.startFailed("start VM", name, j.size, image, err)
 		l.deleteRunner(ctx, j.repo, jit.RunnerID)
 		return nil
 	}
@@ -791,7 +791,7 @@ func (l *Loop) keepSpares(ctx context.Context, now time.Time) {
 		}
 		name := l.newName("spare")
 		if err := l.vms.Create(ctx, l.spec(name, sp.Size, image, "")); err != nil {
-			l.startFailed("start spare", name, sp.Size, image, now, err)
+			l.startFailed("start spare", name, sp.Size, image, err)
 			return
 		}
 		l.machines[name] = &machine{name: name, size: sp.Size, image: image, created: now, state: spare}
@@ -800,15 +800,16 @@ func (l *Loop) keepSpares(ctx context.Context, now time.Time) {
 }
 
 // startFailed counts and logs a failed Create. If the VM may be running, it
-// keeps the VM as killed, so later ticks destroy it and reap it.
-func (l *Loop) startFailed(msg, name, size, image string, now time.Time, err error) {
+// keeps the VM as killed, so later ticks destroy it and reap it. Create can
+// take minutes to fail, so the wait for the VM to appear starts now.
+func (l *Loop) startFailed(msg, name, size, image string, err error) {
 	l.launchFailures++
 	if !errors.Is(err, vm.ErrMayBeRunning) {
 		l.log.Warn(msg, "vm", name, "err", err)
 		return
 	}
 	l.log.Warn(msg+" failed and it may be running, will destroy it", "vm", name, "size", size, "err", err)
-	l.machines[name] = &machine{name: name, size: size, image: image, created: now, state: killed, mayRun: true}
+	l.machines[name] = &machine{name: name, size: size, image: image, created: l.clock.Now(), state: killed, mayRun: true}
 }
 
 func (l *Loop) spec(name, size, image, jit string) vm.Spec {
