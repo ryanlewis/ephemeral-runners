@@ -92,7 +92,8 @@ listens on (SSH, exporters) and to every device on your network.
 blocks that. It lets VMs reach the host only for DHCP and DNS, and blocks
 traffic to private, link-local and CGNAT addresses. It adds its own table and
 leaves libvirt's alone. Set `vm_bridge` at the top if your network's bridge is
-not `virbr0`, add any exceptions you need, then load it:
+not `virbr0`, add any exceptions you need (and your LAN's prefix, if it has
+global IPv6 addresses and the VM network has IPv6), then load it:
 
 ```sh
 sudo nft -f examples/nftables-vm-isolation.nft
@@ -104,8 +105,10 @@ To load it at boot on Debian, copy it into a new `/etc/nftables.d/`, add
 `flush ruleset`, so reloading `nftables.service` while libvirt is running
 also removes libvirt's rules; reload just this file with `nft -f` instead.
 
-To check it, from a VM, `curl` the host's bridge address (`192.168.122.1` on
-`network:default`) and a LAN address: both should fail. `curl
+To check it, from a VM, try a port you know is open on the host's bridge
+address (`192.168.122.1` on `network:default`), such as SSH with `nc -zv -w5
+192.168.122.1 22`, and on a LAN device: both should time out. A refusal
+doesn't count, as that means nothing was listening. `curl
 https://github.com` should work. The example is for a routed network; a
 `bridge:<name>` that puts VMs straight onto your LAN bypasses it, so put such
 a bridge on a network that only reaches the internet.
@@ -114,10 +117,10 @@ a bridge on a network that only reaches the internet.
 can grow to the image's disk size (`DISK_SIZE`, 40G by default), and the
 budget doesn't count disk. So a job can fill the filesystem `vm.state_dir` is
 on. Mount a filesystem or LV of its own at `/var/lib/ephemeral-runners/vms`,
-sized for the worst case: (`spares.count` + the most jobs the budget allows
-at once) × `DISK_SIZE`. With the defaults that is (4 + 12 small jobs) × 40G =
-640G; most jobs use far less. After mounting it, run `sudo
-systemd-tmpfiles --create` to give it the right owner.
+sized for the worst case: the most VMs the budget holds at once (spares
+included) × `DISK_SIZE`. With the defaults that is 12 small VMs × 40G = 480G;
+most jobs use far less. If you mount it after step 1, run `sudo
+systemd-tmpfiles --create` to give it the right owner again.
 
 **1. Install the program.** From a checkout, build the binary as a normal user
 (or cross-compile it elsewhere), then install it as root:
@@ -129,8 +132,8 @@ sudo deploy/install.sh ./ephemeral-runners
 
 This installs the binary to `/usr/local/bin/ephemeral-runners`. (Without an
 argument, `install.sh` builds with the `go` on root's PATH.) It also installs
-the systemd units, creates the `ephemeral-runners` user (in the `libvirt` and
-`kvm` groups) and creates these directories:
+the systemd units, creates the `ephemeral-runners` user (in the `libvirt`
+group) and creates these directories:
 
 | Path | Owner | Mode | Holds |
 | --- | --- | --- | --- |
@@ -274,8 +277,8 @@ build adds no extra packages and no Rust.
 
 It:
 
-1. downloads the current Debian 13 genericcloud image and checks it against
-   Debian's `SHA512SUMS`;
+1. downloads the Debian 13 genericcloud build pinned in `image/versions.env`
+   and checks its SHA-512;
 2. downloads the Actions runner, and `rustup-init` if the config lists Rust
    toolchains, at the versions in `image/versions.env`, and checks their
    SHA-256;
@@ -286,11 +289,14 @@ It:
    it, and keeps the newest `KEEP_IMAGES`.
 
 To pick up a new runner or rustup release, change the version and checksum in
-`image/versions.env` together.
+`image/versions.env` together. To move to a newer Debian image, pick a dated
+directory under <https://cloud.debian.org/images/cloud/trixie/> and take the
+version and hash from its `SHA512SUMS` line.
 
 `deploy/install.sh` also installs a copy of `image/` in
 `/usr/local/lib/ephemeral-runners/image` and a timer that rebuilds the image
-there once a week, which picks up Debian's security updates. Turn it on with
+there once a week. That picks up Debian's security updates through `apt`, but
+the base image itself only changes when you bump its pin. Turn it on with
 `systemctl enable --now ephemeral-runners-image.timer`. The service replaces
 its warm spares once a new image is current. Set `METRICS_FILE` in
 `image.env` to record each build's outcome:
@@ -388,7 +394,7 @@ the JIT config for its own runner.
 **Check libvirt's security driver.** Every VM's QEMU process runs as the same
 user, so only libvirt's security driver keeps one VM's QEMU away from another
 VM's files. On the host, `virsh capabilities | grep -A2 secmodel` should list
-`apparmor` (or `selinux`). Also check that `grep stdio_handler
+`apparmor` (or `selinux`). Also check that `grep '^stdio_handler'
 /etc/libvirt/qemu.conf` shows nothing or `"logd"`: then virtlogd writes each
 VM's serial log and caps its size. If it shows `"file"`, a job can fill the
 disk through its serial console.

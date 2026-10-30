@@ -4,7 +4,8 @@
 #
 # Load with `sudo nft -f nftables-vm-isolation.nft`. Loading it again
 # replaces the table, and it touches no other table, so libvirt's own
-# rules (table ip/ip6 libvirt_network) are left alone.
+# rules are left alone: table ip/ip6 libvirt_network with libvirt's
+# nftables backend, or iptables chains with its iptables backend.
 #
 # For traffic arriving from the VM bridge, it:
 #   - lets VMs reach the host only for DHCP and DNS (libvirt's dnsmasq);
@@ -17,7 +18,8 @@
 # put such a bridge on a network that only reaches the internet instead.
 #
 # Priorities: both chains run at `filter - 10`, before libvirt's forward
-# chain (priority filter, 0) and any distribution firewall at filter. In
+# chain (priority filter, 0, in either backend) and any distribution
+# firewall at filter. In
 # nftables a drop is final, but an accept only ends the chain it is in:
 # later base chains on the same hook still see the packet. So libvirt
 # accepting the traffic later cannot undo a drop here, and an accept here
@@ -54,6 +56,8 @@ table inet vm_isolation {
 			fc00::/7,   # unique local
 			fe80::/10   # link-local
 		}
+		# If your LAN has global IPv6 addresses and the VM network has IPv6,
+		# add your LAN's prefix here too, for example 2001:db8:1234::/48.
 	}
 
 	# Traffic from a VM to the host itself, on any of its addresses.
@@ -63,13 +67,15 @@ table inet vm_isolation {
 		iifname != $vm_bridge accept
 		ct state established,related accept
 
-		udp dport 67 accept comment "DHCP"
-		udp dport 53 accept comment "DNS"
-		tcp dport 53 accept comment "DNS"
+		# Only to the bridge's own addresses (and broadcast for DHCP), so a
+		# resolver listening on the host's LAN address stays out of reach.
+		fib daddr . iif type { local, broadcast } udp dport 67 accept comment "DHCP"
+		fib daddr . iif type local udp dport 53 accept comment "DNS"
+		fib daddr . iif type local tcp dport 53 accept comment "DNS"
 
 		# Only needed if the VM network has IPv6.
 		icmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert } accept
-		udp dport 547 accept comment "DHCPv6"
+		fib daddr . iif type { local, multicast } udp dport 547 accept comment "DHCPv6"
 
 		counter drop
 	}
