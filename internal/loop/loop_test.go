@@ -673,18 +673,33 @@ func TestStartupKeepsWedgedVM(t *testing.T) {
 	}
 }
 
-// A leftover VM's size comes from its name. One whose name has no size,
-// such as a spare, counts as the largest size.
-func TestLeftoverSize(t *testing.T) {
-	r := newRig(t, 0, "")
-	for name, want := range map[string]string{
-		"ex-example-repo-small-0001":  "small",
-		"ex-example-repo-medium-0002": "medium",
-		"ex-spare-0003":               "large",
-		"ex-odd":                      "large",
+// A wedged leftover VM counts in the budget at the size in its name, even
+// one with a hyphen. With no size in its name, as a spare's, it counts as
+// the most of each that any size has.
+func TestWedgedVMRoom(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		sizes map[string]config.Size
+		want  config.Size
+	}{
+		{"ex-example-repo-small-0001", nil, config.Size{VCPUs: 2, MemoryGiB: 4}},
+		{"ex-example-repo-x-large-0001", map[string]config.Size{"large": {VCPUs: 8, MemoryGiB: 8}, "x-large": {VCPUs: 16, MemoryGiB: 32}},
+			config.Size{VCPUs: 16, MemoryGiB: 32}},
+		{"ex-spare-0001", map[string]config.Size{"cpu": {VCPUs: 16, MemoryGiB: 8}, "mem": {VCPUs: 2, MemoryGiB: 32}},
+			config.Size{VCPUs: 16, MemoryGiB: 32}},
+		{"ex-odd", nil, config.Size{VCPUs: 8, MemoryGiB: 20}},
 	} {
-		if got := r.l.leftoverSize(name); got != want {
-			t.Errorf("%s: size %q, want %q", name, got, want)
+		r := newRig(t, 0, "")
+		if tc.sizes != nil {
+			r.l.cfg.Sizes = tc.sizes
+		}
+		r.vms.running[tc.name] = vm.Spec{}
+		r.vms.stuck = map[string]bool{tc.name: true}
+		if err := r.l.Startup(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if got := r.l.used(); got != tc.want {
+			t.Errorf("%s: counts as %+v, want %+v", tc.name, got, tc.want)
 		}
 	}
 }
