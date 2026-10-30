@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -106,7 +107,7 @@ type machine struct {
 	busy     time.Time // when the loop saw its runner take a job
 
 	// mayRun is set when the VM's start failed but its domain may be
-	// running. It counts in the budget and is destroyed each tick until
+	// running, or when Startup could not destroy it. It counts in the budget and is destroyed each tick until
 	// it has been seen running and then gone, or never shows up.
 	mayRun bool
 	seen   bool // listed running since its start failed
@@ -206,9 +207,10 @@ func (l *Loop) Run(ctx context.Context) error {
 
 func (l *Loop) prefix() string { return l.cfg.NamePrefix + "-" }
 
-// Startup destroys every VM with the prefix, removes their files, and
-// deletes the prefix's runners in each repo: with their VMs gone, they are
-// dead even if GitHub still shows them online. GitHub refuses to delete a
+// Startup destroys every VM with the prefix, keeping any that won't die to
+// destroy later, removes the files of the rest, and deletes the prefix's
+// runners in each repo: with their VMs gone, they are dead even if GitHub
+// still shows them online. GitHub refuses to delete a
 // runner it thinks is running a job; it removes that one itself once the
 // job fails for want of its runner.
 func (l *Loop) Startup(ctx context.Context) error {
@@ -217,8 +219,14 @@ func (l *Loop) Startup(ctx context.Context) error {
 		return fmt.Errorf("list VMs: %w", err)
 	}
 	for _, n := range names {
+		// One that won't die is kept like a VM whose start failed, so it
+		// holds its room and each tick destroys it until it is gone.
+		// Prune leaves its files while it is listed.
 		if err := l.vms.Destroy(ctx, n); err != nil {
-			return fmt.Errorf("destroy leftover VM %s: %w", n, err)
+			size := l.leftoverSize(n)
+			l.log.Warn("leftover VM won't destroy, will keep destroying it", "vm", n, "size", size, "err", err)
+			l.machines[n] = &machine{name: n, size: size, created: l.clock.Now(), state: killed, mayRun: true, seen: true}
+			continue
 		}
 		l.log.Info("destroyed leftover VM", "vm", n)
 	}
@@ -252,6 +260,26 @@ func (l *Loop) Startup(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// leftoverSize returns a leftover VM's size from its name,
+// <prefix>-<repo>-<size>-<hex>. A name with no size, such as a spare's,
+// gets the largest, so the budget doesn't count the VM short.
+func (l *Loop) leftoverSize(name string) string {
+	parts := strings.Split(name, "-")
+	if len(parts) >= 2 {
+		if _, ok := l.cfg.Sizes[parts[len(parts)-2]]; ok {
+			return parts[len(parts)-2]
+		}
+	}
+	var largest string
+	for _, n := range slices.Sorted(maps.Keys(l.cfg.Sizes)) {
+		s, big := l.cfg.Sizes[n], l.cfg.Sizes[largest]
+		if largest == "" || s.MemoryGiB > big.MemoryGiB || s.MemoryGiB == big.MemoryGiB && s.VCPUs > big.VCPUs {
+			largest = n
+		}
+	}
+	return largest
 }
 
 // Shutdown destroys the loop's VMs, deletes their runners and removes
