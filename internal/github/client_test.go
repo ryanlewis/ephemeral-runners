@@ -90,8 +90,8 @@ func TestNewDefaults(t *testing.T) {
 	if c.baseURL != "http://127.0.0.1:1" {
 		t.Errorf("baseURL = %q, want trailing slashes trimmed", c.baseURL)
 	}
-	if c.http == nil || c.http.Timeout != 30*time.Second {
-		t.Errorf("default http client = %+v, want a 30s timeout", c.http)
+	if c.http == nil || c.http.Timeout != requestTimeout {
+		t.Errorf("default http client = %+v, want a %s timeout", c.http, requestTimeout)
 	}
 	if c.now == nil || time.Since(c.now()) > time.Minute {
 		t.Error("default clock is not time.Now")

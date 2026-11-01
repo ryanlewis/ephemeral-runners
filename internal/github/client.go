@@ -27,6 +27,11 @@ const (
 	maxBody = 16 << 20
 	// maxCached caps the number of URLs kept in the ETag cache.
 	maxCached = 512
+	// requestTimeout bounds each request of the default HTTP client. GitHub
+	// answers in well under a second, and the loop makes its requests one
+	// after another, so a long timeout stalls a whole poll while GitHub is
+	// unreachable.
+	requestTimeout = 10 * time.Second
 )
 
 // Options configures a Client.
@@ -36,7 +41,7 @@ type Options struct {
 	AppID          int64
 	InstallationID int64
 	Key            *rsa.PrivateKey
-	// HTTPClient defaults to a client with a 30 second timeout.
+	// HTTPClient defaults to a client with a 10 second timeout.
 	HTTPClient *http.Client
 	// Now defaults to time.Now. Tests set it to control token expiry.
 	Now func() time.Time
@@ -119,7 +124,7 @@ func New(o Options) (*Client, error) {
 		now:            o.Now,
 	}
 	if c.http == nil {
-		c.http = &http.Client{Timeout: 30 * time.Second, CheckRedirect: refuseInsecureRedirect}
+		c.http = &http.Client{Timeout: requestTimeout, CheckRedirect: refuseInsecureRedirect}
 	}
 	if c.now == nil {
 		c.now = time.Now
