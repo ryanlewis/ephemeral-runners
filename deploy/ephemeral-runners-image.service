@@ -7,3 +7,4 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 ExecStart=/usr/local/lib/ephemeral-runners/image/build.sh
+TimeoutStartSec=30min

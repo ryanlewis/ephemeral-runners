@@ -65,6 +65,9 @@ on_exit() {
   write_metrics "$rc"
 }
 trap on_exit EXIT
+# Otherwise a build killed by a signal reaches on_exit with $? = 0.
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 debian=https://cloud.debian.org/images/cloud/trixie/$DEBIAN_IMAGE_VERSION
 image="debian-13-genericcloud-amd64-$DEBIAN_IMAGE_VERSION.qcow2"
